@@ -103,20 +103,17 @@ class SettingsServerHistoryStoreTest {
         assertNotNull(store.getById("host-new:8188"))
     }
 
-    @Test fun corrupt_persisted_value_is_silently_dropped_on_load() {
+    @Test fun corrupt_persisted_value_is_silently_dropped_on_load() = runTest {
         val settings = MapSettings()
         settings.putString(SettingsServerHistoryStore.HISTORY_KEY, "not valid json {{{")
         // Constructor must not throw — corrupt state is dropped so the
         // user can still reach the connect flow.
         val store = SettingsServerHistoryStore(settings)
-        // Lazy: getById is suspending; just check the snapshot via
-        // the underlying state (constructor populates state from
-        // settings, an empty map after corruption).
-        // Easiest portable check: a fresh upsert succeeds.
-        kotlinx.coroutines.runBlocking { store.upsert(srv("post-corrupt")) }
-        kotlinx.coroutines.runBlocking {
-            assertNotNull(store.getById("post-corrupt:8188"))
-        }
+        // Easiest portable check: store starts empty after corruption,
+        // and a fresh upsert succeeds.
+        assertTrue(store.listAll().isEmpty())
+        store.upsert(srv("post-corrupt"))
+        assertNotNull(store.getById("post-corrupt:8188"))
     }
 
     @Test fun persisted_format_is_a_json_string_under_HISTORY_KEY() = runTest {
