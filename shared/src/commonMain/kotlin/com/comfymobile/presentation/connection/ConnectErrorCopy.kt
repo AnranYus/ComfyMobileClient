@@ -14,6 +14,18 @@ import com.comfymobile.data.network.ConnectError
  */
 object ConnectErrorCopy {
 
+    /**
+     * What the primary CTA button on the error sheet does. Per @Lily
+     * PR #19 review comment `4413981846` blocker 2: a CTA labelled
+     * "Choose / 去选择" must NOT dispatch [com.comfymobile.data.network.ConnectionInput.Retry]
+     * — retrying without a server immediately returns to
+     * `Lost(NO_ACTIVE_SERVER)` and the user is stuck in a retry loop.
+     * The `DISMISS` variant routes the button click to
+     * [ConnectActions.onDismissError] which closes the error sheet
+     * and reveals the connect form / history list underneath.
+     */
+    enum class PrimaryAction { RETRY, DISMISS }
+
     /** Headline + suggestion shown on the Lost / failed-connect sheet. */
     data class Lookup(
         val titleZh: String,
@@ -24,7 +36,28 @@ object ConnectErrorCopy {
         val suggestionEn: String? = null,
         val primaryCtaZh: String = "重试",
         val primaryCtaEn: String = "Retry",
+        val primaryAction: PrimaryAction = PrimaryAction.RETRY,
     )
+
+    /**
+     * Resolve which click handler the primary CTA button should fire
+     * for an error with the given [primaryAction]. Extracted as a
+     * pure function so unit tests can lock the routing contract
+     * without spinning up a Compose UI test harness — see
+     * `ConnectErrorCopyTest.choose_button_for_no_active_server_routes_to_dismiss_not_retry`.
+     *
+     * Per @Lily PR #19 review `4413981846` blocker 2: a CTA labelled
+     * "Choose / 去选择" must route to dismiss; otherwise the user
+     * loops back into `Lost(NO_ACTIVE_SERVER)` immediately.
+     */
+    fun primaryClickHandler(
+        primaryAction: PrimaryAction,
+        onRetry: () -> Unit,
+        onDismiss: () -> Unit,
+    ): () -> Unit = when (primaryAction) {
+        PrimaryAction.RETRY -> onRetry
+        PrimaryAction.DISMISS -> onDismiss
+    }
 
     fun lookup(error: ConnectError): Lookup = when (error) {
         ConnectError.FORMAT -> Lookup(
@@ -78,7 +111,8 @@ object ConnectErrorCopy {
         // Final copy from @Ores `b522a9f3` (PR #18 thread). CTA is
         // intentionally NOT "Retry" — retrying without a server does
         // nothing; pushing the user back to the connect form is the
-        // correct affordance.
+        // correct affordance, so [primaryAction] is [PrimaryAction.DISMISS]
+        // (per @Lily PR #19 review `4413981846` blocker 2).
         ConnectError.NO_ACTIVE_SERVER -> Lookup(
             titleZh = "没有选中的服务器",
             titleEn = "No active server",
@@ -88,6 +122,7 @@ object ConnectErrorCopy {
             suggestionEn = "Pick a server or enter again",
             primaryCtaZh = "去选择",
             primaryCtaEn = "Choose",
+            primaryAction = PrimaryAction.DISMISS,
         )
         ConnectError.UNKNOWN -> Lookup(
             titleZh = "连接失败",

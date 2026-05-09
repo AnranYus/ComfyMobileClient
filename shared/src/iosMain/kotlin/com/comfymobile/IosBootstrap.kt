@@ -1,14 +1,8 @@
 package com.comfymobile
 
-import com.comfymobile.data.connection.ConnectionStateMachine
-import com.comfymobile.data.connection.ConnectionStateMachineBootstrap
-import com.comfymobile.data.descriptor.NodeDescriptorLoader
-import com.comfymobile.data.descriptor.NodeDescriptorRegistry
-import com.comfymobile.data.di.APP_SCOPE
 import com.comfymobile.data.di.appModule
+import com.comfymobile.data.di.bootSharedRuntime
 import com.comfymobile.data.di.iosPlatformModule
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.launch
 import org.koin.core.KoinApplication
 import org.koin.core.context.startKoin
 
@@ -22,10 +16,16 @@ import org.koin.core.context.startKoin
  * SwiftUI scene lifetime.
  *
  * Idempotent: the cached [koinApp] guards against double-init if
- * SwiftUI re-runs the `App.init`. We hold a direct reference to the
- * [KoinApplication] returned by [startKoin] rather than going through
- * `GlobalContext`/`KoinPlatformTools` so the iOS K/N target compiles
- * (per @Lily PR #19 review comment `4413957569` blocker 1).
+ * SwiftUI re-runs the `App.init` somehow under hot-reload. We hold
+ * a direct reference to the [KoinApplication] returned by
+ * [startKoin] rather than going through `GlobalContext` /
+ * `KoinPlatformTools` so the iOS K/N target compiles (per @Lily
+ * PR #19 review comment `4413957569` blocker 1).
+ *
+ * Process-startup work (state machine start, bootstrap start, async
+ * descriptor-registry load) is delegated to the shared
+ * `bootSharedRuntime(koin)` helper so this iOS bootstrap never
+ * reaches into shared `internal` qualifiers.
  *
  * Exposed under the Swift name `IosBootstrapKt.bootKoinIos()`.
  */
@@ -43,14 +43,5 @@ fun bootKoinIos() {
     }
     koinApp = app
 
-    val koin = app.koin
-    koin.get<ConnectionStateMachine>().start()
-    koin.get<ConnectionStateMachineBootstrap>().start()
-
-    // Async load of the descriptor registry; declared into Koin once
-    // available so Phase-2 consumers can inject it.
-    koin.get<CoroutineScope>(qualifier = APP_SCOPE).launch {
-        val registry = NodeDescriptorLoader.load()
-        koin.declare<NodeDescriptorRegistry>(registry)
-    }
+    bootSharedRuntime(app.koin)
 }
