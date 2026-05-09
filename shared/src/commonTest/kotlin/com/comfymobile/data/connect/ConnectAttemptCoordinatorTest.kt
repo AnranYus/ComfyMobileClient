@@ -386,10 +386,18 @@ class ConnectAttemptCoordinatorTest {
             vm.onPortChanged("8188")
             // No friendly name set.
             vm.onSubmit()
-            val saved = withTimeout(5_000) {
-                activeServer.current.first { it != null }
-            }!!
-            assertEquals("192.168.1.10", saved.label)
+            // Per @Lily PR #18 review: use Retry as the terminal
+            // sync point — the coordinator dispatches it AFTER
+            // historyStore.upsert(...) AND activeServer.setActive(...)
+            // on the same coroutine, so once Retry has landed both
+            // side effects are guaranteed visible. This matches the
+            // ordering already proven by the success-path test.
+            withTimeout(5_000) {
+                facade.dispatched.first { ConnectionInput.Retry in it }
+            }
+            // Now assert the fallback label off the resulting state.
+            assertEquals("192.168.1.10", activeServer.current.value?.label)
+            assertEquals("192.168.1.10", store.getById("192.168.1.10:8188")?.label)
         } finally {
             coord.stop()
             coroutineContext.cancelChildren()
