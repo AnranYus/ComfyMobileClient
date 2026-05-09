@@ -517,6 +517,7 @@ cat > iosApp/iosApp.xcodeproj/project.pbxproj <<'EOF_PBX'
 					"$(inherited)",
 					"-framework",
 					shared,
+					"-lsqlite3",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.slock.comfymobileclient;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -552,6 +553,7 @@ cat > iosApp/iosApp.xcodeproj/project.pbxproj <<'EOF_PBX'
 					"$(inherited)",
 					"-framework",
 					shared,
+					"-lsqlite3",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.slock.comfymobileclient;
 				PRODUCT_NAME = "$(TARGET_NAME)";
