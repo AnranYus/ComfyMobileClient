@@ -1,0 +1,206 @@
+# ComfyMobileClient — Node Descriptor Table v1
+#
+# Source of truth for "which params on which nodes the mobile app exposes for editing".
+#
+# Loaded at startup by `data/descriptor/NodeDescriptorRegistry`
+# (target runtime path: `shared/src/commonMain/resources/node-descriptors/v1.yaml`).
+#
+# Extracted from `docs/ux/T0.3-ux-mobile-comfy.md` §4. ControlNet boundary
+# per `docs/CONTEXT.md` v4 + Phase 0 review (Lily af796498 / Priestess Option A).
+#
+# Schema (informal — formalized when Alice locks NodeDescriptor Kotlin types):
+#   schema_version: 1
+#   node_descriptors:
+#     <classType>:
+#       display_name: {zh, en}
+#       description?: {zh, en}
+#       editable_params:                # absent or empty → no editable params
+#         <param_name>:
+#           display_name: {zh, en}
+#           control: <ControlType>      # Number | Integer | Slider | Toggle |
+#                                       # SingleLineText | MultilineText | Dropdown |
+#                                       # ModelPicker | ImagePicker | Hidden
+#           range?: [min, max]          # numeric / slider only
+#           step?: <number>              # numeric / slider only
+#           presets?: [...]              # slider only; either bare values or {label, value}
+#           source?:                    # dynamic enum source (Dropdown / *Picker)
+#             type: NodeEnumFromObjectInfo | ModelFolder | EmbeddingsList
+#             folder?: <name>           # only for ModelFolder
+#           autocomplete?: [embedding, lora]   # MultilineText only
+#           help: {zh, en}
+#
+# Boundary (NOT in this file → handled as unknown / read-only / topology-locked):
+#   - LoadImage (control image swap = workflow restructure, v1.5+)
+#   - legacy ApplyControlNet (no Advanced suffix)
+#   - any custom ControlNet preprocessor / loader
+
+schema_version: 1
+
+node_descriptors:
+
+  CheckpointLoaderSimple:
+    display_name: { zh: 加载基础模型, en: Load Checkpoint }
+    description:
+      zh: 主模型（决定生成的整体风格和质量）。
+    editable_params:
+      ckpt_name:
+        display_name: { zh: 模型, en: Checkpoint }
+        control: ModelPicker
+        source: { type: ModelFolder, folder: checkpoints }
+        help: { zh: 选择基础模型 (.safetensors / .ckpt)。 }
+
+  CLIPTextEncode:
+    display_name: { zh: 提示词, en: Prompt }
+    description:
+      zh: 描述你想生成的内容；通常工作流里有"正向"和"反向"两个。
+    editable_params:
+      text:
+        display_name: { zh: 提示词文本, en: Text }
+        control: MultilineText
+        autocomplete: [embedding, lora]
+        help: { zh: 描述你想要的画面；输入 < 可补全 LoRA，输入 embedding: 可补全 embedding。 }
+
+  KSampler:
+    display_name: { zh: 采样器, en: Sampler }
+    description:
+      zh: 控制采样过程；最常调的是 seed / steps / cfg。
+    editable_params:
+      seed:
+        display_name: { zh: 随机种子, en: Seed }
+        control: Integer
+        # UI layer renders as "Seed special" variant: number field + 🎲 random + 🔒 lock buttons
+        help: { zh: 同种子+同参数=同图。 }
+      steps:
+        display_name: { zh: 步数, en: Steps }
+        control: Slider
+        range: [1, 150]
+        step: 1
+        presets:
+          - { label: Quick, value: 20 }
+          - { label: Default, value: 30 }
+          - { label: High, value: 50 }
+        help: { zh: 采样迭代次数。多 = 更精细但更慢；20–30 通常足够。 }
+      cfg:
+        display_name: { zh: 提示词强度, en: CFG }
+        control: Slider
+        range: [0, 30]
+        step: 0.5
+        help: { zh: 提示词对生成的约束力。7 是常用起点；过高会过曝/扭曲。 }
+      sampler_name:
+        display_name: { zh: 采样算法, en: Sampler }
+        control: Dropdown
+        source: { type: NodeEnumFromObjectInfo }
+        help: { zh: 算法不同观感不同；不知道选哪个就用 euler 或 dpmpp_2m。 }
+      scheduler:
+        display_name: { zh: 调度器, en: Scheduler }
+        control: Dropdown
+        source: { type: NodeEnumFromObjectInfo }
+        help: { zh: 配合采样算法决定噪声衰减曲线；常用 normal / karras。 }
+      denoise:
+        display_name: { zh: 去噪强度, en: Denoise }
+        control: Slider
+        range: [0, 1]
+        step: 0.05
+        help: { zh: 1.0 = 从头生图；< 1.0 = 在原图上修改（图生图常用）。 }
+
+  EmptyLatentImage:
+    display_name: { zh: 空白画布, en: Empty Latent }
+    description:
+      zh: 设定生成图的尺寸和数量。
+    editable_params:
+      width:
+        display_name: { zh: 宽度, en: Width }
+        control: Slider
+        range: [64, 2048]
+        step: 64
+        presets: [512, 768, 1024, 1536]
+        help: { zh: 像素宽度；常见 512/768（SD 1.5）或 1024（SDXL）。 }
+      height:
+        display_name: { zh: 高度, en: Height }
+        control: Slider
+        range: [64, 2048]
+        step: 64
+        presets: [512, 768, 1024, 1536]
+        help: { zh: 像素高度。 }
+      batch_size:
+        display_name: { zh: 批量, en: Batch }
+        control: Integer
+        # UI layer may render as "Stepper" variant: +/- buttons around the input
+        range: [1, 8]
+        help: { zh: 一次生成几张图；多 = 慢且占显存。 }
+
+  VAEDecode:
+    display_name: { zh: VAE 解码, en: VAE Decode }
+    description:
+      zh: 把潜空间张量解码回图像；通常无需调整。
+    editable_params: {}
+
+  SaveImage:
+    display_name: { zh: 保存图片, en: Save Image }
+    description:
+      zh: 让 ComfyUI 把生图保存到服务器的 output 目录。
+    editable_params:
+      filename_prefix:
+        display_name: { zh: 文件名前缀, en: Filename Prefix }
+        control: SingleLineText
+        help: { zh: 保存文件名前缀（可加日期或工作流名）。 }
+
+  LoraLoader:
+    display_name: { zh: LoRA, en: LoRA }
+    description:
+      zh: 在基础模型上叠加 LoRA 风格/角色权重。
+    editable_params:
+      lora_name:
+        display_name: { zh: LoRA 模型, en: LoRA }
+        control: ModelPicker
+        source: { type: ModelFolder, folder: loras }
+        help: { zh: 选择已安装的 LoRA 文件。 }
+      strength_model:
+        display_name: { zh: 模型强度, en: Strength (Model) }
+        control: Slider
+        range: [0, 2]
+        step: 0.05
+        help: { zh: LoRA 对主模型的影响强度；常用 0.6–1.0。 }
+      strength_clip:
+        display_name: { zh: 提示词强度, en: Strength (CLIP) }
+        control: Slider
+        range: [0, 2]
+        step: 0.05
+        help: { zh: LoRA 对提示词理解的影响；通常与模型强度同步。 }
+
+  ControlNetLoader:
+    display_name: { zh: ControlNet 加载, en: Load ControlNet }
+    description:
+      zh: 加载 ControlNet 控制模型（边缘 / 姿态 / 深度等）。
+    editable_params:
+      control_net_name:
+        display_name: { zh: ControlNet 模型, en: ControlNet }
+        control: ModelPicker
+        source: { type: ModelFolder, folder: controlnet }
+        help: { zh: 选择已安装的 ControlNet 模型。 }
+
+  ControlNetApply:
+    display_name: { zh: ControlNet 应用, en: Apply ControlNet }
+    description:
+      zh: 把 ControlNet 施加到提示词条件上，强度决定它的影响力。
+    editable_params:
+      strength:
+        display_name: { zh: ControlNet 强度, en: Strength }
+        control: Slider
+        range: [0, 2]
+        step: 0.05
+        help: { zh: ControlNet 对生成的影响强度；常用 0.6–1.0。 }
+    # 此节点本身没有 start_percent / end_percent；本变体是基础版
+
+  ControlNetApplyAdvanced:
+    display_name: { zh: ControlNet 应用（高级）, en: Apply ControlNet (Advanced) }
+    description:
+      zh: 高级版 ControlNet 应用；额外含 start/end percent，但 v1 仅暴露 strength，其余只读保持默认。
+    editable_params:
+      strength:
+        display_name: { zh: ControlNet 强度, en: Strength }
+        control: Slider
+        range: [0, 2]
+        step: 0.05
+        help: { zh: ControlNet 对生成的影响强度；常用 0.6–1.0。 }
+    # v1 边界：start_percent / end_percent 仅读保持默认；不在 MVP 暴露
