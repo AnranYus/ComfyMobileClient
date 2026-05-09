@@ -4,6 +4,7 @@ import com.comfymobile.data.network.ConnectionInput
 import com.comfymobile.data.network.ConnectionState
 import com.comfymobile.data.persistence.InMemoryServerHistoryStore
 import com.comfymobile.domain.server.ServerInfo
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -98,7 +99,7 @@ class ConnectViewModelTest {
         val viewModel = ConnectViewModel(
             machine = FakeConnectionStateMachine(),
             historyStore = store,
-            scope = backgroundScope,
+            scope = this,
         )
 
         viewModel.onServerLongPressed(server)
@@ -108,6 +109,7 @@ class ConnectViewModelTest {
 
         assertEquals("Renamed", store.getById("192.168.1.5:8188")?.label)
         assertTrue(viewModel.screenState.value.friendlyNameModal is FriendlyNameModalState.Hidden)
+        coroutineContext.cancelChildren()
     }
 
     @Test fun deleting_history_entry_removes_it_from_store() = runTest {
@@ -123,13 +125,14 @@ class ConnectViewModelTest {
         val viewModel = ConnectViewModel(
             machine = FakeConnectionStateMachine(),
             historyStore = store,
-            scope = backgroundScope,
+            scope = this,
         )
 
         viewModel.onServerDelete(server)
         advanceUntilIdle()
 
         assertNull(store.getById("192.168.1.5:8188"))
+        coroutineContext.cancelChildren()
     }
 
     @Test fun dismiss_error_hides_error_details_without_dispatching_retry() = runTest {
@@ -137,12 +140,14 @@ class ConnectViewModelTest {
         val viewModel = ConnectViewModel(
             machine = machine,
             historyStore = InMemoryServerHistoryStore(),
-            scope = backgroundScope,
+            scope = this,
         )
 
         viewModel.onDismissError()
+        advanceUntilIdle()
 
         assertTrue(!viewModel.screenState.value.showErrorDetails)
         assertTrue(machine.dispatchedInputs.isEmpty())
+        coroutineContext.cancelChildren()
     }
 }
