@@ -246,24 +246,34 @@ class ConnectionEffectRunnerTest {
             ws = ws,
             scope = this,
         )
-        val collector = async { runner.producedInputs.take(2).toList() }
-        advanceUntilIdle()
-        runner.run(SideEffectIntent.OpenWs(clientId = "client-uuid-42"))
-        advanceUntilIdle()
-        val ev1 = WsEvent.ExecutionStart(promptId = "p-1")
-        val ev2 = WsEvent.Progress(promptId = "p-1", node = "3", value = 5, max = 20)
-        // Channel-backed pushFrame buffers if the runner has not yet
-        // subscribed; no risk of frame loss.
-        ws.pushFrame(ev1)
-        ws.pushFrame(ev2)
-        advanceUntilIdle()
-        val collected = collector.await()
-        assertEquals(2, collected.size)
-        val first = assertIs<ConnectionInput.Ws>(collected[0])
-        val second = assertIs<ConnectionInput.Ws>(collected[1])
-        assertEquals(ev1, first.event)
-        assertEquals(ev2, second.event)
-        assertEquals("client-uuid-42", ws.lastClientId)
+        try {
+            val collector = async { runner.producedInputs.take(2).toList() }
+            advanceUntilIdle()
+            runner.run(SideEffectIntent.OpenWs(clientId = "client-uuid-42"))
+            advanceUntilIdle()
+            val ev1 = WsEvent.ExecutionStart(promptId = "p-1")
+            val ev2 = WsEvent.Progress(promptId = "p-1", node = "3", value = 5, max = 20)
+            // Channel-backed pushFrame buffers if the runner has not
+            // yet subscribed; no risk of frame loss.
+            ws.pushFrame(ev1)
+            ws.pushFrame(ev2)
+            advanceUntilIdle()
+            val collected = collector.await()
+            assertEquals(2, collected.size)
+            val first = assertIs<ConnectionInput.Ws>(collected[0])
+            val second = assertIs<ConnectionInput.Ws>(collected[1])
+            assertEquals(ev1, first.event)
+            assertEquals(ev2, second.event)
+            assertEquals("client-uuid-42", ws.lastClientId)
+        } finally {
+            // OpenWs starts a long-lived collect job on the runTest
+            // scope; without explicit shutdown it would still be
+            // alive when the test body returns and runTest would
+            // fail with UncompletedCoroutinesError. (Per @Lily PR #6
+            // review, msg `11700f67`.)
+            runner.shutdown()
+            ws.frames.close()
+        }
     }
 
     @Test fun open_ws_emits_Ws_drop_LAN_FLAKE_when_session_throws() = runTest {
@@ -273,15 +283,20 @@ class ConnectionEffectRunnerTest {
             ws = ws,
             scope = this,
         )
-        val collector = async { runner.producedInputs.take(1).toList() }
-        advanceUntilIdle()
-        runner.run(SideEffectIntent.OpenWs(clientId = "any"))
-        advanceUntilIdle()
-        val collected = collector.await()
-        assertEquals(1, collected.size)
-        val drop = assertIs<ConnectionInput.Ws>(collected.single())
-        assertEquals(WsDropReason.LAN_FLAKE, drop.droppedReason)
-        assertEquals(null, drop.event)
+        try {
+            val collector = async { runner.producedInputs.take(1).toList() }
+            advanceUntilIdle()
+            runner.run(SideEffectIntent.OpenWs(clientId = "any"))
+            advanceUntilIdle()
+            val collected = collector.await()
+            assertEquals(1, collected.size)
+            val drop = assertIs<ConnectionInput.Ws>(collected.single())
+            assertEquals(WsDropReason.LAN_FLAKE, drop.droppedReason)
+            assertEquals(null, drop.event)
+        } finally {
+            runner.shutdown()
+            ws.frames.close()
+        }
     }
 
     private fun makeRunner(scope: CoroutineScope): ConnectionEffectRunner =
