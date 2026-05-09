@@ -1,0 +1,45 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+# IntelliJ / Android Studio
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+local.properties
+captures/
+
+# Xcode
+xcuserdata/
+*.xcworkspace/
+DerivedData/
+*.xcuserstate
+project.xcworkspace
+**/Pods/
+
+# macOS
+.DS_Store
+
+# OS / IDE noise
+Thumbs.db
+*.log
+.vscode/
+
+# Kotlin Multiplatform
+kotlin-js-store/
+shared/build/
+shared/bin/
+
+# Gradle wrapper download
+gradle-wrapper-*.zip
+
+# Sensitive
+*.keystore
+*.jks
+release/
+keystore.properties

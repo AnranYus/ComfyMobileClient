@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Phase 0 placeholder — runs on every push but doesn't yet build the KMP project
+  # because the Gradle scaffolding lands in Phase 1.0 (see BOOTSTRAP.md).
+  docs-and-structure-check:
+    name: Docs & structure check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify required docs are present
+        run: |
+          set -e
+          test -f README.md
+          test -f BOOTSTRAP.md
+          test -d docs/architecture
+          test -d docs/decisions
+          test -f docs/decisions/README.md
+          echo "Docs structure OK"
+
+      - name: Verify ADR index lists all ADR files
+        run: |
+          set -e
+          adr_files=$(ls docs/decisions/ADR-*.md 2>/dev/null | sort)
+          for f in $adr_files; do
+            base=$(basename "$f")
+            if ! grep -q "$base" docs/decisions/README.md; then
+              echo "ADR index missing entry for $base"
+              exit 1
+            fi
+          done
+          echo "All ADRs indexed"
+
+  # Phase 1 will replace this with: build :shared, build :androidApp,
+  # cross-compile iosArm64, and run unit tests on commonTest.
