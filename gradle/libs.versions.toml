@@ -1,0 +1,80 @@
+[versions]
+# Build / language
+kotlin = "2.0.21"
+agp = "8.7.3"
+compose-multiplatform = "1.7.0"
+
+# Android targets
+android-minSdk = "24"
+android-compileSdk = "34"
+android-targetSdk = "34"
+
+# Networking / serialization
+ktor = "3.0.1"
+kotlinx-coroutines = "1.9.0"
+kotlinx-serialization = "1.7.3"
+
+# Persistence / state
+sqldelight = "2.0.2"
+multiplatform-settings = "1.2.0"
+
+# DI / images / logging
+koin = "4.0.0"
+coil = "3.0.4"
+napier = "2.7.1"
+
+# AndroidX
+androidx-activity-compose = "1.9.3"
+androidx-lifecycle = "2.8.7"
+
+[libraries]
+# Coroutines
+kotlinx-coroutines-core             = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-core", version.ref = "kotlinx-coroutines" }
+kotlinx-coroutines-android          = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-android", version.ref = "kotlinx-coroutines" }
+
+# Serialization
+kotlinx-serialization-json          = { module = "org.jetbrains.kotlinx:kotlinx-serialization-json", version.ref = "kotlinx-serialization" }
+
+# Ktor (HTTP + WebSocket)
+ktor-client-core                    = { module = "io.ktor:ktor-client-core",                       version.ref = "ktor" }
+ktor-client-content-negotiation     = { module = "io.ktor:ktor-client-content-negotiation",        version.ref = "ktor" }
+ktor-serialization-kotlinx-json     = { module = "io.ktor:ktor-serialization-kotlinx-json",        version.ref = "ktor" }
+ktor-client-websockets              = { module = "io.ktor:ktor-client-websockets",                 version.ref = "ktor" }
+ktor-client-okhttp                  = { module = "io.ktor:ktor-client-okhttp",                     version.ref = "ktor" }
+ktor-client-darwin                  = { module = "io.ktor:ktor-client-darwin",                     version.ref = "ktor" }
+
+# SQLDelight
+sqldelight-runtime                  = { module = "app.cash.sqldelight:runtime",                    version.ref = "sqldelight" }
+sqldelight-coroutines-extensions    = { module = "app.cash.sqldelight:coroutines-extensions",      version.ref = "sqldelight" }
+sqldelight-android-driver           = { module = "app.cash.sqldelight:android-driver",             version.ref = "sqldelight" }
+sqldelight-native-driver            = { module = "app.cash.sqldelight:native-driver",              version.ref = "sqldelight" }
+
+# Multiplatform Settings
+multiplatform-settings              = { module = "com.russhwolf:multiplatform-settings",                       version.ref = "multiplatform-settings" }
+multiplatform-settings-coroutines   = { module = "com.russhwolf:multiplatform-settings-coroutines",            version.ref = "multiplatform-settings" }
+
+# Koin
+koin-core                           = { module = "io.insert-koin:koin-core",                       version.ref = "koin" }
+koin-compose                        = { module = "io.insert-koin:koin-compose",                    version.ref = "koin" }
+koin-android                        = { module = "io.insert-koin:koin-android",                    version.ref = "koin" }
+
+# Coil 3 (Multiplatform image loading)
+coil-compose                        = { module = "io.coil-kt.coil3:coil-compose",                  version.ref = "coil" }
+coil-network-ktor                   = { module = "io.coil-kt.coil3:coil-network-ktor3",            version.ref = "coil" }
+
+# Napier (cross-platform logging)
+napier                              = { module = "io.github.aakira:napier",                       version.ref = "napier" }
+
+# AndroidX
+androidx-activity-compose           = { module = "androidx.activity:activity-compose",             version.ref = "androidx-activity-compose" }
+androidx-lifecycle-runtime-compose  = { module = "androidx.lifecycle:lifecycle-runtime-compose",   version.ref = "androidx-lifecycle" }
+
+[plugins]
+androidApplication      = { id = "com.android.application",                version.ref = "agp" }
+androidLibrary          = { id = "com.android.library",                    version.ref = "agp" }
+kotlinAndroid           = { id = "org.jetbrains.kotlin.android",           version.ref = "kotlin" }
+kotlinMultiplatform     = { id = "org.jetbrains.kotlin.multiplatform",     version.ref = "kotlin" }
+kotlinSerialization     = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }
+composeMultiplatform    = { id = "org.jetbrains.compose",                  version.ref = "compose-multiplatform" }
+composeCompiler         = { id = "org.jetbrains.kotlin.plugin.compose",    version.ref = "kotlin" }
+sqldelight              = { id = "app.cash.sqldelight",                    version.ref = "sqldelight" }

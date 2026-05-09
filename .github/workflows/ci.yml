@@ -5,11 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
-  # Phase 0 placeholder — runs on every push but doesn't yet build the KMP project
-  # because the Gradle scaffolding lands in Phase 1.0 (see BOOTSTRAP.md).
-  docs-and-structure-check:
+  docs-and-structure:
     name: Docs & structure check
     runs-on: ubuntu-latest
     steps:
@@ -38,5 +37,61 @@ jobs:
           done
           echo "All ADRs indexed"
 
-  # Phase 1 will replace this with: build :shared, build :androidApp,
-  # cross-compile iosArm64, and run unit tests on commonTest.
+  android-build:
+    name: Android build smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # setup-android@v3 expects packages as a single space-separated string,
+          # not a YAML list. Multiline `|` syntax is parsed as one concatenated
+          # package name and fails with "Failed to find package".
+          packages: "platforms;android-34 build-tools;34.0.0 platform-tools"
+
+      - name: Assemble debug APK
+        run: ./gradlew :androidApp:assembleDebug --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: comfymobileclient-debug-apk
+          path: androidApp/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+  shared-compile-ios:
+    name: Shared module compile (iOS targets)
+    # Compiles the KMP iOS targets without producing an IPA — proves
+    # commonMain + iosMain code is syntactically + type-checkable for
+    # Apple Silicon and x86_64 simulators. Full xcodeproj + IPA come
+    # in T1.0b on macos-latest.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Compile iOS Arm64
+        run: ./gradlew :shared:compileKotlinIosArm64 --stacktrace
+
+      - name: Compile iOS Simulator Arm64
+        run: ./gradlew :shared:compileKotlinIosSimulatorArm64 --stacktrace
