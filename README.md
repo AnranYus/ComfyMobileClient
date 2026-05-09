@@ -4,10 +4,12 @@ Mobile client for [ComfyUI](https://github.com/comfyanonymous/ComfyUI) — bring
 
 ## Status
 
-**Phase 0 — alignment & design (in progress).** No runnable code yet. The repo currently contains:
+**Phase 0 — alignment & design (closing for review).** No runnable code yet. The repo currently contains:
 
+- Project glossary (`docs/CONTEXT.md`)
 - Architecture decisions (`docs/decisions/`)
-- Phase 0 design notes (`docs/architecture/`)
+- Architecture / integration docs (`docs/architecture/`)
+- UX / wireframes / control catalog (`docs/ux/`)
 - Skeleton placeholders for the Phase 1 KMP module structure
 
 See [`BOOTSTRAP.md`](BOOTSTRAP.md) for what the first Phase 1 commit will add.
