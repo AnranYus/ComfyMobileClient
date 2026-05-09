@@ -82,7 +82,7 @@ class ConnectionEffectRunnerTest {
     }
 
     @Test fun schedule_timer_emits_Timer_input_after_delay() = runTest {
-        val runner = makeRunner(scope = TestScope(testScheduler))
+        val runner = makeRunner(scope = this)
         val collected = mutableListOf<ConnectionInput>()
         val job = launch { runner.producedInputs.take(1).collect { collected += it } }
         advanceUntilIdle()
@@ -97,7 +97,7 @@ class ConnectionEffectRunnerTest {
     }
 
     @Test fun cancel_timer_prevents_emission() = runTest {
-        val runner = makeRunner(scope = TestScope(testScheduler))
+        val runner = makeRunner(scope = this)
         val collected = mutableListOf<ConnectionInput>()
         val job = launch { runner.producedInputs.take(1).collect { collected += it } }
         advanceUntilIdle()
@@ -117,7 +117,7 @@ class ConnectionEffectRunnerTest {
     }
 
     @Test fun rescheduling_same_tick_replaces_previous_timer() = runTest {
-        val runner = makeRunner(scope = TestScope(testScheduler))
+        val runner = makeRunner(scope = this)
         val collected = mutableListOf<ConnectionInput>()
         val job = launch { runner.producedInputs.take(1).collect { collected += it } }
         advanceUntilIdle()
@@ -134,7 +134,7 @@ class ConnectionEffectRunnerTest {
     }
 
     @Test fun poll_history_with_completed_status_emits_Completed_result() = runTest {
-        val runner = makeRunner(scope = TestScope(testScheduler))
+        val runner = makeRunner(scope = this)
         val collected = mutableListOf<ConnectionInput>()
         val job = launch { runner.producedInputs.take(1).collect { collected += it } }
         advanceUntilIdle()
@@ -151,7 +151,7 @@ class ConnectionEffectRunnerTest {
         val runner = ConnectionEffectRunner(
             http = http(historyResponse = """{"p-1":{"status":{"status_str":"running","completed":false}}}"""),
             ws = FakeWs(),
-            scope = TestScope(testScheduler),
+            scope = this,
         )
         val collected = mutableListOf<ConnectionInput>()
         val job = launch { runner.producedInputs.take(1).collect { collected += it } }
@@ -165,7 +165,7 @@ class ConnectionEffectRunnerTest {
     }
 
     @Test fun poll_active_history_fans_out_one_poll_per_tracked_prompt() = runTest {
-        val runner = makeRunner(scope = TestScope(testScheduler))
+        val runner = makeRunner(scope = this)
         runner.trackInFlight("p-1")
         runner.trackInFlight("p-2")
         runner.trackInFlight("p-3")
@@ -183,7 +183,7 @@ class ConnectionEffectRunnerTest {
     }
 
     @Test fun poll_active_history_with_no_inflight_is_a_no_op() = runTest {
-        val runner = makeRunner(scope = TestScope(testScheduler))
+        val runner = makeRunner(scope = this)
         val collected = mutableListOf<ConnectionInput>()
         val job = launch { runner.producedInputs.take(1).collect { collected += it } }
         advanceUntilIdle()
@@ -201,7 +201,7 @@ class ConnectionEffectRunnerTest {
     }
 
     @Test fun emit_error_pushes_to_emitted_errors_flow() = runTest {
-        val runner = makeRunner(scope = TestScope(testScheduler))
+        val runner = makeRunner(scope = this)
         val errors = mutableListOf<ConnectError>()
         val job = launch { runner.emittedErrors.take(1).collect { errors += it } }
         advanceUntilIdle()
@@ -215,7 +215,7 @@ class ConnectionEffectRunnerTest {
         // Regression: the errorFlow uses replay = 1 (per @Lily PR #6
         // review msg `0e87febf`) so a UI subscribing AFTER the error
         // was already classified still sees it.
-        val runner = makeRunner(scope = TestScope(testScheduler))
+        val runner = makeRunner(scope = this)
         runner.run(SideEffectIntent.EmitError(ConnectError.WRONG_PORT_404))
         advanceUntilIdle()
         val errors = mutableListOf<ConnectError>()
@@ -247,7 +247,7 @@ class ConnectionEffectRunnerTest {
         val runner = ConnectionEffectRunner(
             http = http(),
             ws = ws,
-            scope = TestScope(testScheduler),
+            scope = this,
         )
         val collected = mutableListOf<ConnectionInput>()
         val collectJob = launch {
@@ -275,7 +275,7 @@ class ConnectionEffectRunnerTest {
         val runner = ConnectionEffectRunner(
             http = http(),
             ws = ws,
-            scope = TestScope(testScheduler),
+            scope = this,
         )
         val collected = mutableListOf<ConnectionInput>()
         val job = launch {
