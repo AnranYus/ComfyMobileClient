@@ -43,10 +43,19 @@ data class QueueDeleteRequestDto(
     val delete: List<String>,
 )
 
-/** Body for `POST /queue {clear: true}`. */
+/**
+ * Body for `POST /queue {clear: true}`.
+ *
+ * `clear` has no Kotlin default — kotlinx-serialization's default
+ * `encodeDefaults = false` would otherwise drop the field on the
+ * wire, making the body `{}` and silently no-op'ing the call. The
+ * caller always passes `true` explicitly.
+ *
+ * Caught by @Lily PR #5 review (msg `95d49591`).
+ */
 @Serializable
 data class QueueClearRequestDto(
-    val clear: Boolean = true,
+    val clear: Boolean,
 )
 
 /**
