@@ -57,7 +57,16 @@ class ConnectionEffectRunner(
         get() = errorFlow.asSharedFlow()
 
     private val producedChannel = Channel<ConnectionInput>(Channel.UNLIMITED)
-    private val errorFlow = MutableSharedFlow<ConnectError>(extraBufferCapacity = 16)
+    /**
+     * `replay = 1` so the latest classified error is delivered to a
+     * subscriber that arrives after the runner has already emitted —
+     * UIs typically subscribe asynchronously after the connect flow
+     * already failed once. With `replay = 0` the error would be lost,
+     * leading to a stuck UI that knows the connection is broken but
+     * has no specific reason to display. (Caught by @Lily PR #6
+     * review, msg `0e87febf`.)
+     */
+    private val errorFlow = MutableSharedFlow<ConnectError>(replay = 1, extraBufferCapacity = 16)
     private val timerJobs = mutableMapOf<TimerTick, Job>()
     private var wsJob: Job? = null
 

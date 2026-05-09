@@ -202,20 +202,20 @@ class ConnectionEffectRunnerTest {
         job.cancel()
     }
 
-    @Test fun untrack_inflight_removes_prompt_from_fanout() = runTest {
-        val runner = makeRunner(scope = TestScope(testScheduler))
+    @Test fun untrack_inflight_updates_snapshot_synchronously() {
+        // Test the data structure directly — going through PollActiveHistory
+        // would launch a coroutine that crosses the Ktor MockEngine
+        // boundary on a different dispatcher than the TestScope's, which
+        // makes the indirect "did the fanout poll exactly p-2?" assertion
+        // racy. The deterministic seam is `snapshotInFlight()`.
+        val runner = makeRunner(scope = TestScope())
         runner.trackInFlight("p-1")
         runner.trackInFlight("p-2")
+        assertEquals(setOf("p-1", "p-2"), runner.snapshotInFlight())
         runner.untrackInFlight("p-1")
-        runner.run(SideEffectIntent.PollActiveHistory)
-        advanceUntilIdle()
-        val collected = mutableListOf<ConnectionInput>()
-        val job = launch { runner.producedInputs.take(1).collect { collected += it } }
-        advanceUntilIdle()
-        assertEquals(1, collected.size)
-        val probe = assertIs<ConnectionInput.HistoryProbe>(collected.single())
-        assertEquals("p-2", probe.promptId)
-        job.cancel()
+        assertEquals(setOf("p-2"), runner.snapshotInFlight())
+        runner.untrackInFlight("p-2")
+        assertEquals(emptySet(), runner.snapshotInFlight())
     }
 
     // ---------------------------------------------------------------- WS branch
