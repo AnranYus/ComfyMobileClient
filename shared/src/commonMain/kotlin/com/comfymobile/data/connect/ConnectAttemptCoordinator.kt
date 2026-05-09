@@ -1,6 +1,5 @@
 package com.comfymobile.data.connect
 
-import com.comfymobile.data.network.ComfyHttpClient
 import com.comfymobile.data.network.ComfyHttpException
 import com.comfymobile.data.network.ConnectAttemptOutcome
 import com.comfymobile.data.network.ConnectError
@@ -47,11 +46,13 @@ class ConnectAttemptCoordinator(
     private val scope: CoroutineScope,
     private val nowEpochMs: () -> Long,
     /**
-     * Factory hook for the per-server [ComfyHttpClient]. The DI
-     * module supplies `{ baseUrl -> ComfyHttpClient(baseUrl, …) }`;
-     * tests substitute a fake.
+     * `/system_stats` probe seam. Production binds it to
+     * `ComfyHttpClient(baseUrl).getSystemStats()`; tests pass a
+     * suspending lambda that runs on the test scheduler so they
+     * never have to drive Ktor's `MockEngine` through virtual
+     * time. See [SystemStatsProbe] for the contract.
      */
-    private val httpClientFor: (baseUrl: String) -> ComfyHttpClient,
+    private val probe: SystemStatsProbe,
 ) {
 
     private var job: Job? = null
@@ -76,9 +77,8 @@ class ConnectAttemptCoordinator(
 
     private suspend fun handleConnectRequested(submit: ServerFormSubmit) {
         val baseUrl = "http://${submit.host}:${submit.port}"
-        val client = httpClientFor(baseUrl)
         try {
-            client.getSystemStats()
+            probe(baseUrl)
             // Probe succeeded → record / refresh server entry, mark
             // it active, nudge the state machine out of Lost.
             val server = ServerInfo(

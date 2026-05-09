@@ -2,6 +2,7 @@ package com.comfymobile.data.di
 
 import com.comfymobile.data.connect.ActiveServerHolder
 import com.comfymobile.data.connect.ConnectAttemptCoordinator
+import com.comfymobile.data.connect.SystemStatsProbe
 import com.comfymobile.data.network.ComfyHttpClient
 import com.comfymobile.data.network.ComfyWebSocketClient
 import com.comfymobile.data.network.WebSocketSource
@@ -144,8 +145,9 @@ fun appModule(): Module = module {
             activeServer = get(),
             scope = vmScope,
             nowEpochMs = { nowEpochMs() },
-            httpClientFor = { baseUrl ->
+            probe = SystemStatsProbe { baseUrl ->
                 get<ComfyHttpClient> { org.koin.core.parameter.parametersOf(baseUrl) }
+                    .getSystemStats()
             },
         )
     }

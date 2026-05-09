@@ -1,24 +1,13 @@
 package com.comfymobile.data.connect
 
 import com.comfymobile.data.connection.ConnectionStateMachineFacade
-import com.comfymobile.data.network.ComfyHttpClient
+import com.comfymobile.data.network.ComfyHttpException
 import com.comfymobile.data.network.ConnectError
 import com.comfymobile.data.network.ConnectionInput
 import com.comfymobile.data.network.ConnectionState
 import com.comfymobile.data.persistence.InMemoryServerHistoryStore
-import com.comfymobile.domain.server.ServerInfo
 import com.comfymobile.presentation.connection.ConnectViewModel
 import com.comfymobile.presentation.connection.ConnectionLanguage
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.mock.MockEngine
-import io.ktor.client.engine.mock.respond
-import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
-import io.ktor.http.ContentType
-import io.ktor.http.HttpHeaders
-import io.ktor.http.HttpStatusCode
-import io.ktor.http.headersOf
-import io.ktor.serialization.kotlinx.json.json
-import io.ktor.utils.io.ByteReadChannel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancelChildren
@@ -27,38 +16,43 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.withTimeout
-import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
- * Tests follow @Lily's pattern (PR #18 review msgs `795b6cb4` /
- * `d699debd`): the assertion synchronisation point is a direct
- * await on the *target* side effect (e.g.
- * `activeServer.current.first { it != null }`,
- * `historyStore.observeAll().first { matches }`,
- * `facade.dispatched.first { contains expected }`) — NOT
- * `runCurrent()` / `advanceUntilIdle()` which can return before
- * the MockEngine probe coroutine has resumed on its own dispatcher.
+ * Coordinator-level tests run **fully on the `runTest` scheduler** by
+ * substituting [SystemStatsProbe] with a plain suspending lambda
+ * (per @Lily PR #18 review comment `4413882022` — Ktor's MockEngine
+ * dispatches probes onto a thread pool whose progress is opaque to
+ * `runTest`'s virtual time, so coordinator tests that drive an
+ * `HttpClient(MockEngine)` were inherently flaky no matter which
+ * side-effect they awaited).
+ *
+ * Ktor-layer status / parsing behaviour is exercised separately in
+ * `ComfyHttpClientTest`.
+ *
+ * Synchronisation pattern:
+ *  - `runCurrent()` after `vm.onSubmit()` drains the channel send +
+ *    the coordinator's `onEach` body + the synchronous probe lambda
+ *    + the synchronous side effects (`historyStore.upsert`,
+ *    `activeServer.setActive`, `machine.dispatch`).
+ *  - Then assertions read the snapshot directly:
+ *    `activeServer.current.value`, `store.getById(...)`,
+ *    `facade.dispatched.value`.
  *
  * Cleanup (`coord.stop()` + `coroutineContext.cancelChildren()`) is
- * always in `finally` so an assertion failure still leaves the test
- * scope tidy.
+ * always in `finally` so an assertion failure still tears the
+ * `stateIn(SharingStarted.Eagerly)` collectors of [ConnectViewModel]
+ * down.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConnectAttemptCoordinatorTest {
 
-    /**
-     * Records dispatched inputs in a [StateFlow] so tests can suspend
-     * via [first] until the expected input lands, no matter which
-     * dispatcher the dispatch ran on.
-     */
+    /** Records dispatched inputs as a [StateFlow] for snapshot reads. */
     private class CapturingFacade : ConnectionStateMachineFacade {
         private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Connected)
         override val currentState: StateFlow<ConnectionState> = _state.asStateFlow()
@@ -70,23 +64,11 @@ class ConnectAttemptCoordinatorTest {
         }
     }
 
-    private fun client(responder: () -> Pair<HttpStatusCode, String>): ComfyHttpClient {
-        val mock = HttpClient(MockEngine { _ ->
-            val (status, body) = responder()
-            respond(
-                content = ByteReadChannel(body),
-                status = status,
-                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
-            )
-        }) {
-            install(ContentNegotiation) {
-                json(Json { ignoreUnknownKeys = true })
-            }
-        }
-        return ComfyHttpClient("http://stub", mock)
-    }
+    private fun successProbe(): SystemStatsProbe = SystemStatsProbe { /* no-op = success */ }
 
-    @Test fun successful_probe_upserts_server_sets_active_dispatches_Retry() = runTest {
+    private fun probeThrowing(error: Throwable): SystemStatsProbe = SystemStatsProbe { throw error }
+
+    @Test fun success_probe_upserts_server_sets_active_dispatches_Retry() = runTest {
         val store = InMemoryServerHistoryStore()
         val facade = CapturingFacade()
         val activeServer = ActiveServerHolder()
@@ -103,11 +85,7 @@ class ConnectAttemptCoordinatorTest {
             activeServer = activeServer,
             scope = this,
             nowEpochMs = { 1234L },
-            httpClientFor = { _ ->
-                client {
-                    HttpStatusCode.OK to """{"system":{"comfyui_version":"0.3.4"},"devices":[]}"""
-                }
-            },
+            probe = successProbe(),
         )
         try {
             coord.start()
@@ -115,27 +93,28 @@ class ConnectAttemptCoordinatorTest {
             vm.onPortChanged("8188")
             vm.onFriendlyNameChanged("MacBook")
             vm.onSubmit()
+            // Drain the test scheduler — channel receive +
+            // coordinator onEach + synchronous probe + synchronous
+            // side effects all run here.
+            runCurrent()
 
-            // Direct await: side effect lands on activeServer.
-            val saved = withTimeout(5_000) {
-                activeServer.current.first { it != null }
-            }!!
+            // History upserted.
+            val saved = store.getById("192.168.1.10:8188")
+            assertNotNull(saved)
             assertEquals("MacBook", saved.label)
             assertEquals(1234L, saved.lastConnectedAtEpochMs)
 
-            // Direct await: history list contains the entry.
-            val historyMatch = withTimeout(5_000) {
-                store.observeAll().first { list -> list.any { it.serverId == saved.serverId } }
-            }
-            assertEquals(saved.serverId, historyMatch.first().serverId)
+            // Active server pointer set.
+            assertEquals(saved, activeServer.current.value)
 
-            // Direct await: dispatch list contains Retry.
-            val dispatchedAfter = withTimeout(5_000) {
-                facade.dispatched.first { list -> ConnectionInput.Retry in list }
-            }
+            // Retry dispatched, no ConnectAttempt failure dispatched.
             assertTrue(
-                dispatchedAfter.none { it is ConnectionInput.ConnectAttempt },
-                "Expected no ConnectAttempt dispatch on success, got: $dispatchedAfter",
+                facade.dispatched.value.none { it is ConnectionInput.ConnectAttempt },
+                "Expected no ConnectAttempt dispatch on success, got: ${facade.dispatched.value}",
+            )
+            assertTrue(
+                facade.dispatched.value.contains(ConnectionInput.Retry),
+                "Expected Retry dispatch on success, got: ${facade.dispatched.value}",
             )
         } finally {
             coord.stop()
@@ -158,21 +137,19 @@ class ConnectAttemptCoordinatorTest {
             machine = facade,
             activeServer = ActiveServerHolder(),
             scope = this,
-            nowEpochMs = { 1L },
-            httpClientFor = { _ ->
-                client {
-                    HttpStatusCode.OK to """{"system":{"comfyui_version":"0.3.4"},"devices":[]}"""
-                }
-            },
+            nowEpochMs = { 1234L },
+            probe = successProbe(),
         )
         try {
             coord.start()
             vm.onHostChanged("192.168.1.10")
             vm.onPortChanged("8188")
             vm.onSubmit()
-            withTimeout(5_000) {
-                facade.dispatched.first { ConnectionInput.Retry in it }
-            }
+            runCurrent()
+            assertTrue(
+                facade.dispatched.value.contains(ConnectionInput.Retry),
+                "Expected Retry dispatch, got: ${facade.dispatched.value}",
+            )
         } finally {
             coord.stop()
             coroutineContext.cancelChildren()
@@ -195,21 +172,19 @@ class ConnectAttemptCoordinatorTest {
             activeServer = ActiveServerHolder(),
             scope = this,
             nowEpochMs = { 1234L },
-            httpClientFor = { _ -> client { HttpStatusCode.NotFound to "" } },
+            probe = probeThrowing(ComfyHttpException.HttpStatus(statusCode = 404)),
         )
         try {
             coord.start()
             vm.onHostChanged("192.168.1.10")
             vm.onPortChanged("8188")
             vm.onSubmit()
+            runCurrent()
 
-            val attempt = withTimeout(5_000) {
-                facade.dispatched
-                    .first { list -> list.any { it is ConnectionInput.ConnectAttempt } }
-                    .filterIsInstance<ConnectionInput.ConnectAttempt>()
-                    .single()
-            }
-            assertEquals(ConnectError.WRONG_PORT_404, attempt.classified)
+            val attempts = facade.dispatched.value
+                .filterIsInstance<ConnectionInput.ConnectAttempt>()
+            assertEquals(1, attempts.size, "Got: ${facade.dispatched.value}")
+            assertEquals(ConnectError.WRONG_PORT_404, attempts.single().classified)
             // Server NOT saved on failure.
             assertEquals(null, store.getById("192.168.1.10:8188"))
         } finally {
@@ -234,23 +209,27 @@ class ConnectAttemptCoordinatorTest {
             activeServer = ActiveServerHolder(),
             scope = this,
             nowEpochMs = { 1234L },
-            httpClientFor = { _ ->
-                client { HttpStatusCode.OK to """{"system":{},"devices":[]}""" }
-            },
+            // ComfyHttpClient.getSystemStats throws MissingField when
+            // /system_stats parses but `system.comfyui_version` is
+            // absent — the canonical "not ComfyUI" signal.
+            probe = probeThrowing(
+                ComfyHttpException.MissingField(
+                    endpoint = "/system_stats",
+                    field = "system.comfyui_version",
+                ),
+            ),
         )
         try {
             coord.start()
             vm.onHostChanged("192.168.1.10")
             vm.onPortChanged("8188")
             vm.onSubmit()
+            runCurrent()
 
-            val attempt = withTimeout(5_000) {
-                facade.dispatched
-                    .first { list -> list.any { it is ConnectionInput.ConnectAttempt } }
-                    .filterIsInstance<ConnectionInput.ConnectAttempt>()
-                    .single()
-            }
-            assertEquals(ConnectError.NOT_COMFYUI, attempt.classified)
+            val attempts = facade.dispatched.value
+                .filterIsInstance<ConnectionInput.ConnectAttempt>()
+            assertEquals(1, attempts.size, "Got: ${facade.dispatched.value}")
+            assertEquals(ConnectError.NOT_COMFYUI, attempts.single().classified)
         } finally {
             coord.stop()
             coroutineContext.cancelChildren()
@@ -258,6 +237,8 @@ class ConnectAttemptCoordinatorTest {
     }
 
     @Test fun probe_failure_does_NOT_set_active_server() = runTest {
+        // Per @Lily PR #18 review: active server is only set on
+        // verified probe success — never from a failed attempt.
         val store = InMemoryServerHistoryStore()
         val facade = CapturingFacade()
         val activeServer = ActiveServerHolder()
@@ -274,20 +255,14 @@ class ConnectAttemptCoordinatorTest {
             activeServer = activeServer,
             scope = this,
             nowEpochMs = { 1L },
-            httpClientFor = { _ -> client { HttpStatusCode.NotFound to "" } },
+            probe = probeThrowing(ComfyHttpException.HttpStatus(statusCode = 404)),
         )
         try {
             coord.start()
             vm.onHostChanged("192.168.1.10")
             vm.onPortChanged("8188")
             vm.onSubmit()
-            // Wait until the failure dispatch lands, which proves the
-            // probe coroutine has fully completed. After that, assert
-            // activeServer was NOT touched.
-            withTimeout(5_000) {
-                facade.dispatched
-                    .first { list -> list.any { it is ConnectionInput.ConnectAttempt } }
-            }
+            runCurrent()
             assertEquals(null, activeServer.current.value)
         } finally {
             coord.stop()
@@ -297,22 +272,11 @@ class ConnectAttemptCoordinatorTest {
 
     @Test fun coordinator_propagates_CancellationException() = runTest {
         // Regression: per @Lily PR #18 review (msg `75c88c17`),
-        // `catch (t: Throwable)` must not swallow CancellationException.
-        // The probe coroutine throws CancellationException synchronously,
-        // which the coordinator must rethrow rather than turning into
-        // a ConnectAttempt failure dispatch.
+        // `catch (t: Throwable)` must not swallow CancellationException
+        // (would break structured concurrency — the VM scope cancelling
+        // the coordinator must propagate to the in-flight probe).
         val store = InMemoryServerHistoryStore()
         val facade = CapturingFacade()
-        val cancellingClient = ComfyHttpClient(
-            baseUrl = "http://stub",
-            client = HttpClient(MockEngine { _ ->
-                throw CancellationException("test cancel")
-            }) {
-                install(ContentNegotiation) {
-                    json(Json { ignoreUnknownKeys = true })
-                }
-            },
-        )
         val vm = ConnectViewModel(
             machine = facade,
             historyStore = store,
@@ -326,26 +290,17 @@ class ConnectAttemptCoordinatorTest {
             activeServer = ActiveServerHolder(),
             scope = this,
             nowEpochMs = { 1L },
-            httpClientFor = { _ -> cancellingClient },
+            probe = probeThrowing(CancellationException("test cancel")),
         )
         try {
             coord.start()
             vm.onHostChanged("192.168.1.10")
             vm.onPortChanged("8188")
             vm.onSubmit()
-            // Suspend a tiny virtual moment to give the launch a
-            // chance to start; we never expect a dispatch, so we
-            // can't `first { ... }` on dispatched here. Instead we
-            // verify by stopping the coordinator and inspecting the
-            // final dispatched list — it must NOT contain a
-            // ConnectAttempt.
-            // `runCurrent()` is an extension on TestScope; calling
-            // fully-qualified breaks Android compile (the compiler
-            // parses it as a top-level call and can't bind the
-            // extension receiver). Use the imported form so the
-            // implicit `this: TestScope` receiver from `runTest` is
-            // picked up.
             runCurrent()
+            // Coordinator's launchIn job should be cancelled by the
+            // propagated CancellationException; no ConnectAttempt
+            // dispatched (because the probe was cancelled, not failed).
             assertTrue(
                 facade.dispatched.value
                     .filterIsInstance<ConnectionInput.ConnectAttempt>().isEmpty(),
@@ -374,11 +329,7 @@ class ConnectAttemptCoordinatorTest {
             activeServer = activeServer,
             scope = this,
             nowEpochMs = { 1L },
-            httpClientFor = { _ ->
-                client {
-                    HttpStatusCode.OK to """{"system":{"comfyui_version":"0.3.4"},"devices":[]}"""
-                }
-            },
+            probe = successProbe(),
         )
         try {
             coord.start()
@@ -386,16 +337,7 @@ class ConnectAttemptCoordinatorTest {
             vm.onPortChanged("8188")
             // No friendly name set.
             vm.onSubmit()
-            // Per @Lily PR #18 review: use Retry as the terminal
-            // sync point — the coordinator dispatches it AFTER
-            // historyStore.upsert(...) AND activeServer.setActive(...)
-            // on the same coroutine, so once Retry has landed both
-            // side effects are guaranteed visible. This matches the
-            // ordering already proven by the success-path test.
-            withTimeout(5_000) {
-                facade.dispatched.first { ConnectionInput.Retry in it }
-            }
-            // Now assert the fallback label off the resulting state.
+            runCurrent()
             assertEquals("192.168.1.10", activeServer.current.value?.label)
             assertEquals("192.168.1.10", store.getById("192.168.1.10:8188")?.label)
         } finally {
