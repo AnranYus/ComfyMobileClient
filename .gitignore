@@ -17,6 +17,8 @@ captures/
 # Xcode
 xcuserdata/
 *.xcworkspace/
+!iosApp/iosApp.xcworkspace/
+!iosApp/iosApp.xcworkspace/**
 DerivedData/
 *.xcuserstate
 project.xcworkspace
@@ -31,6 +33,7 @@ Thumbs.db
 .vscode/
 
 # Kotlin Multiplatform
+.kotlin/
 kotlin-js-store/
 shared/build/
 shared/bin/

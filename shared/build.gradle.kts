@@ -52,6 +52,9 @@ kotlin {
 
             implementation(libs.sqldelight.runtime)
             implementation(libs.sqldelight.coroutines.extensions)
+
+            implementation(libs.multiplatform.settings)
+            implementation(libs.multiplatform.settings.coroutines)
         }
         commonTest.dependencies {
             implementation(kotlin("test"))
@@ -64,6 +67,11 @@ kotlin {
             // them visible to commonTest in KMP.)
             implementation(libs.ktor.client.content.negotiation)
             implementation(libs.ktor.serialization.kotlinx.json)
+            // MapSettings (in-memory Settings impl) for
+            // SettingsServerHistoryStoreTest. Lives in the
+            // -test artifact, separate from the main
+            // multiplatform-settings dep.
+            implementation(libs.multiplatform.settings.test)
         }
         androidMain.dependencies {
             implementation(libs.androidx.activity.compose)
