@@ -54,6 +54,7 @@ sqldelight-native-driver            = { module = "app.cash.sqldelight:native-dri
 # Multiplatform Settings
 multiplatform-settings              = { module = "com.russhwolf:multiplatform-settings",                       version.ref = "multiplatform-settings" }
 multiplatform-settings-coroutines   = { module = "com.russhwolf:multiplatform-settings-coroutines",            version.ref = "multiplatform-settings" }
+multiplatform-settings-test         = { module = "com.russhwolf:multiplatform-settings-test",                  version.ref = "multiplatform-settings" }
 
 # Koin
 koin-core                           = { module = "io.insert-koin:koin-core",                       version.ref = "koin" }
