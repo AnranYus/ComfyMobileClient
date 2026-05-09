@@ -55,7 +55,6 @@ class ConnectViewModel(
             formState = form,
             formValidation = validation,
             history = history,
-            activeServer = history.firstOrNull(),
             errorContext = error.context,
             showErrorDetails = error.showDetails,
             friendlyNameModal = modal,

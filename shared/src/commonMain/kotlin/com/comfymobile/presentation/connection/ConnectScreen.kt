@@ -84,8 +84,7 @@ fun ConnectScreen(
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
-            val showStatus = !(state.isFirstRun && state.connectionState == ConnectionState.Connected)
-            if (showStatus) {
+            if (state.shouldShowStatusIndicator) {
                 ConnectionStatusIndicator(
                     ui = state.statusUi,
                     language = language,

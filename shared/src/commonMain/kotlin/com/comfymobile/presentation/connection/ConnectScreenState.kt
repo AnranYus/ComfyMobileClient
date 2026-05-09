@@ -11,7 +11,7 @@ data class ConnectScreenState(
     val formState: ServerFormState = ServerFormState(),
     val formValidation: ServerFormValidation = ServerFormValidation(),
     val history: List<ServerInfo> = emptyList(),
-    val activeServer: ServerInfo? = history.firstOrNull(),
+    val activeServer: ServerInfo? = null,
     val errorContext: ConnectErrorContext? = null,
     val showErrorDetails: Boolean = true,
     val friendlyNameModal: FriendlyNameModalState = FriendlyNameModalState.Hidden,
@@ -19,6 +19,9 @@ data class ConnectScreenState(
 ) {
     val isFirstRun: Boolean
         get() = history.isEmpty()
+
+    val shouldShowStatusIndicator: Boolean
+        get() = connectionState != ConnectionState.Connected || activeServer != null
 
     val statusUi: ConnectionStatusUi
         get() = ConnectionStatusUi.from(connectionState, activeServer)

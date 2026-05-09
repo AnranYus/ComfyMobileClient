@@ -86,6 +86,31 @@ class ConnectViewModelTest {
         )
     }
 
+    @Test fun saved_history_does_not_become_active_server_on_connected_cold_start() = runTest {
+        val store = InMemoryServerHistoryStore()
+        val server = ServerInfo(
+            serverId = "192.168.1.5:8188",
+            host = "192.168.1.5",
+            port = 8188,
+            label = "Studio Mac",
+            lastConnectedAtEpochMs = 100L,
+        )
+        store.upsert(server)
+        val viewModel = ConnectViewModel(
+            machine = FakeConnectionStateMachine(ConnectionState.Connected),
+            historyStore = store,
+            scope = this,
+        )
+
+        advanceUntilIdle()
+
+        val state = viewModel.screenState.value
+        assertEquals(listOf(server), state.history)
+        assertNull(state.activeServer)
+        assertEquals("Connected", state.statusUi.label.resolve(ConnectionLanguage.En))
+        coroutineContext.cancelChildren()
+    }
+
     @Test fun friendly_modal_save_updates_history_store() = runTest {
         val store = InMemoryServerHistoryStore()
         val server = ServerInfo(

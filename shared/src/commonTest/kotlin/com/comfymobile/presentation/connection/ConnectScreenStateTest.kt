@@ -24,6 +24,24 @@ class ConnectScreenStateTest {
         assertFalse(ui.pulsing)
         assertNull(ui.banner)
         assertEquals("Connected to Studio Mac", ui.label.resolve(ConnectionLanguage.En))
+        assertTrue(
+            ConnectScreenState(
+                connectionState = ConnectionState.Connected,
+                history = listOf(server()),
+                activeServer = server(),
+            ).shouldShowStatusIndicator,
+        )
+    }
+
+    @Test fun connected_history_without_active_server_omits_saved_label() {
+        val state = ConnectScreenState(
+            connectionState = ConnectionState.Connected,
+            history = listOf(server()),
+        )
+
+        assertNull(state.activeServer)
+        assertEquals("Connected", state.statusUi.label.resolve(ConnectionLanguage.En))
+        assertFalse(state.shouldShowStatusIndicator)
     }
 
     @Test fun lan_flake_reconnecting_is_subtle_and_silent() {
