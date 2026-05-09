@@ -1,0 +1,86 @@
+-- Local job index for the mobile client. The mobile app maintains this
+-- record as the authoritative product history (per CONTEXT.md v4 layered
+-- history: server `/history` is authoritative for completion + outputs;
+-- the local index is the product-side source of truth so a server that
+-- prunes its history doesn't take user-visible jobs with it).
+--
+-- Ghost-state reconciliation (per ADR-0004 / T0.5 G-04 / G-05): on
+-- B/C reconnect, the runner takes every row whose status is queued or
+-- running and asks `/history/{prompt_id}` whether it actually finished
+-- while the client was offline. The reconciler updates rows in place
+-- so a phantom in_progress never lingers in the UI.
+
+CREATE TABLE jobIndex (
+    -- ComfyUI's prompt_id (UUID-shaped string) is the primary key.
+    prompt_id TEXT NOT NULL PRIMARY KEY,
+
+    -- Server identifier from T1.4 (host:port + friendly_label hash).
+    -- Per-server isolation lets a single device track jobs against
+    -- multiple ComfyUI instances without leaking history.
+    server_id TEXT NOT NULL,
+
+    -- Status enum; mirrors the lifecycle in domain/job/JobStatus.kt.
+    -- Stored as TEXT for human-readable DB inspection; the repository
+    -- layer maps to/from the enum.
+    status TEXT NOT NULL,
+
+    -- The UI-format workflow snapshot captured at submit time, in the
+    -- form expected by extra_pnginfo.workflow (per ADR-0003). Stored
+    -- as JSON text (not BLOB) so DB inspection / migration is simpler.
+    -- Allowed to be null for rows imported from server-side history
+    -- where we no longer have the original workflow text.
+    workflow_snapshot_json TEXT,
+
+    -- The API-format prompt JSON we POSTed (or attempted to POST) to
+    -- /prompt. Same nullable rationale as workflow_snapshot_json.
+    api_prompt_json TEXT,
+
+    -- Free-form short label; T1.4 fills this with the workflow's
+    -- name + a generation index for display in the history list.
+    label TEXT,
+
+    -- Unix milliseconds. created_at is set when we first record the
+    -- submission attempt; finished_at is set once the row reaches a
+    -- terminal status (succeeded / failed / interrupted).
+    created_at INTEGER NOT NULL,
+    finished_at INTEGER
+);
+
+-- History list ordering: most-recent first within a server. The
+-- composite index lets `listByServer(server_id, limit, offset)` use
+-- only the index without a sort step.
+CREATE INDEX jobIndex_byServer_byCreated
+    ON jobIndex(server_id, created_at DESC);
+
+-- ----- queries -----
+
+insertJob:
+INSERT INTO jobIndex(
+    prompt_id, server_id, status,
+    workflow_snapshot_json, api_prompt_json,
+    label, created_at, finished_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+updateStatus:
+UPDATE jobIndex SET status = ?, finished_at = ? WHERE prompt_id = ?;
+
+selectByPromptId:
+SELECT * FROM jobIndex WHERE prompt_id = ?;
+
+selectByServer:
+SELECT * FROM jobIndex
+WHERE server_id = ?
+ORDER BY created_at DESC
+LIMIT :limit OFFSET :offset;
+
+selectInflight:
+SELECT * FROM jobIndex
+WHERE server_id = ?
+  AND status IN ('queued', 'running')
+ORDER BY created_at DESC;
+
+deleteByServer:
+DELETE FROM jobIndex WHERE server_id = ?;
+
+deleteAll:
+DELETE FROM jobIndex;
