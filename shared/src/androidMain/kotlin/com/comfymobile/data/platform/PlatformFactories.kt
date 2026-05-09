@@ -21,3 +21,5 @@ actual fun createSettings(context: PlatformContext): Settings {
     )
     return SharedPreferencesSettings(prefs)
 }
+
+actual fun nowEpochMs(): Long = System.currentTimeMillis()
