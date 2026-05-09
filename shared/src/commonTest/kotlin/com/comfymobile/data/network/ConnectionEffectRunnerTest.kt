@@ -28,12 +28,20 @@ import kotlin.test.assertIs
 
 /**
  * Drives [ConnectionEffectRunner] with a virtual-time `TestScope` so
- * timer ticks resolve deterministically. WS / HTTP collaborators are
- * stubbed; assertions look at what
- * [ConnectionEffectRunner.producedInputs] emits.
+ * timer ticks resolve deterministically. Per @Lily seam (msgs
+ * `e106ec46`, `14983d87`), every `producedInputs` assertion follows
+ * the **collector-first** pattern:
  *
- * Per @Lily seam (msg `e106ec46`), focus areas: WS frame → input,
- * timer cancel, PollActiveHistory fan-out, WS drop classification.
+ * ```
+ * launch { runner.producedInputs.take(N).collect { ... } }   // subscribe first
+ * advanceUntilIdle()                                         // ensure subscribed
+ * runner.run(SideEffectIntent.X)                             // trigger
+ * advanceUntilIdle()                                         // drain
+ * ```
+ *
+ * The "fire-then-subscribe" pattern is racy across JVM/Native because
+ * `Channel.receiveAsFlow()` requires the collector to be active when
+ * the value is sent.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConnectionEffectRunnerTest {
@@ -56,10 +64,10 @@ class ConnectionEffectRunnerTest {
     }
 
     /**
-     * In-memory [WebSocketSource] used by tests. Each `connect()`
-     * call returns a Flow that drains [frames] (a SharedFlow tests
-     * push events into). When [throwOnConnect] is non-null, the Flow
-     * emits then throws to simulate a WS drop.
+     * In-memory [WebSocketSource] used by tests. Each `connect()` call
+     * returns a Flow draining [frames] (a SharedFlow tests push events
+     * into); when [throwOnConnect] is non-null, the Flow throws to
+     * simulate a WS drop.
      */
     private class FakeWs : WebSocketSource {
         val frames = MutableSharedFlow<WsEvent>(replay = 0, extraBufferCapacity = 64)
@@ -69,22 +77,18 @@ class ConnectionEffectRunnerTest {
         override fun connect(clientId: String): Flow<WsEvent> {
             lastClientId = clientId
             val err = throwOnConnect
-            return if (err != null) {
-                flow { throw err }
-            } else {
-                frames
-            }
+            return if (err != null) flow { throw err } else frames
         }
     }
 
     @Test fun schedule_timer_emits_Timer_input_after_delay() = runTest {
         val runner = makeRunner(scope = TestScope(testScheduler))
+        val collected = mutableListOf<ConnectionInput>()
+        val job = launch { runner.producedInputs.take(1).collect { collected += it } }
+        advanceUntilIdle()
         runner.run(SideEffectIntent.ScheduleTimer(TimerTick.ReconnectFallbackPoll, millis = 5_000))
         advanceTimeBy(4_999)
-        val collected = mutableListOf<ConnectionInput>()
-        val job = launch {
-            runner.producedInputs.take(1).collect { collected += it }
-        }
+        assertTrue(collected.isEmpty(), "timer must not fire before delay elapses")
         advanceTimeBy(2)
         advanceUntilIdle()
         assertEquals(1, collected.size)
@@ -94,17 +98,17 @@ class ConnectionEffectRunnerTest {
 
     @Test fun cancel_timer_prevents_emission() = runTest {
         val runner = makeRunner(scope = TestScope(testScheduler))
+        val collected = mutableListOf<ConnectionInput>()
+        val job = launch { runner.producedInputs.take(1).collect { collected += it } }
+        advanceUntilIdle()
         runner.run(SideEffectIntent.ScheduleTimer(TimerTick.ReconnectGiveUp, millis = 30_000))
         runner.run(SideEffectIntent.CancelTimer(TimerTick.ReconnectGiveUp))
         advanceTimeBy(31_000)
         advanceUntilIdle()
-        // No input was sent; verify by scheduling a different timer
-        // and checking it's the first emission.
+        assertTrue(collected.isEmpty(), "cancelled timer must not fire")
+        // Schedule a fresh timer to verify the runner is still functional.
         runner.run(SideEffectIntent.ScheduleTimer(TimerTick.ReconnectFallbackPoll, millis = 1_000))
         advanceTimeBy(1_001)
-        advanceUntilIdle()
-        val collected = mutableListOf<ConnectionInput>()
-        val job = launch { runner.producedInputs.take(1).collect { collected += it } }
         advanceUntilIdle()
         assertEquals(1, collected.size)
         val timer = assertIs<ConnectionInput.Timer>(collected[0])
@@ -114,29 +118,29 @@ class ConnectionEffectRunnerTest {
 
     @Test fun rescheduling_same_tick_replaces_previous_timer() = runTest {
         val runner = makeRunner(scope = TestScope(testScheduler))
+        val collected = mutableListOf<ConnectionInput>()
+        val job = launch { runner.producedInputs.take(1).collect { collected += it } }
+        advanceUntilIdle()
         runner.run(SideEffectIntent.ScheduleTimer(TimerTick.ReconnectFallbackPoll, millis = 30_000))
         runner.run(SideEffectIntent.ScheduleTimer(TimerTick.ReconnectFallbackPoll, millis = 1_000))
         advanceTimeBy(1_500)
         advanceUntilIdle()
-        val collected = mutableListOf<ConnectionInput>()
-        val job = launch { runner.producedInputs.take(1).collect { collected += it } }
-        advanceUntilIdle()
         assertEquals(1, collected.size)
         assertEquals(ConnectionInput.Timer(TimerTick.ReconnectFallbackPoll), collected[0])
-        // Original 30s timer must NOT fire — advance way past.
+        // Original 30s timer must NOT fire; advance way past, no extra emission.
         advanceTimeBy(31_000)
         advanceUntilIdle()
-        // No additional emission expected.
         job.cancel()
     }
 
     @Test fun poll_history_with_completed_status_emits_Completed_result() = runTest {
         val runner = makeRunner(scope = TestScope(testScheduler))
-        runner.run(SideEffectIntent.PollHistory(promptId = "p-1"))
-        advanceUntilIdle()
         val collected = mutableListOf<ConnectionInput>()
         val job = launch { runner.producedInputs.take(1).collect { collected += it } }
         advanceUntilIdle()
+        runner.run(SideEffectIntent.PollHistory(promptId = "p-1"))
+        advanceUntilIdle()
+        assertEquals(1, collected.size)
         val probe = assertIs<ConnectionInput.HistoryProbe>(collected.single())
         assertEquals("p-1", probe.promptId)
         assertEquals(HistoryProbeResult.Completed, probe.result)
@@ -149,11 +153,12 @@ class ConnectionEffectRunnerTest {
             ws = FakeWs(),
             scope = TestScope(testScheduler),
         )
-        runner.run(SideEffectIntent.PollHistory(promptId = "p-1"))
-        advanceUntilIdle()
         val collected = mutableListOf<ConnectionInput>()
         val job = launch { runner.producedInputs.take(1).collect { collected += it } }
         advanceUntilIdle()
+        runner.run(SideEffectIntent.PollHistory(promptId = "p-1"))
+        advanceUntilIdle()
+        assertEquals(1, collected.size)
         val probe = assertIs<ConnectionInput.HistoryProbe>(collected.single())
         assertEquals(HistoryProbeResult.Running, probe.result)
         job.cancel()
@@ -164,10 +169,10 @@ class ConnectionEffectRunnerTest {
         runner.trackInFlight("p-1")
         runner.trackInFlight("p-2")
         runner.trackInFlight("p-3")
-        runner.run(SideEffectIntent.PollActiveHistory)
-        advanceUntilIdle()
         val collected = mutableListOf<ConnectionInput>()
         val job = launch { runner.producedInputs.take(3).collect { collected += it } }
+        advanceUntilIdle()
+        runner.run(SideEffectIntent.PollActiveHistory)
         advanceUntilIdle()
         assertEquals(3, collected.size)
         val probedPromptIds = collected
@@ -179,13 +184,16 @@ class ConnectionEffectRunnerTest {
 
     @Test fun poll_active_history_with_no_inflight_is_a_no_op() = runTest {
         val runner = makeRunner(scope = TestScope(testScheduler))
-        runner.run(SideEffectIntent.PollActiveHistory)
-        advanceUntilIdle()
-        runner.run(SideEffectIntent.ScheduleTimer(TimerTick.ReconnectFallbackPoll, millis = 1))
-        advanceTimeBy(2)
-        advanceUntilIdle()
         val collected = mutableListOf<ConnectionInput>()
         val job = launch { runner.producedInputs.take(1).collect { collected += it } }
+        advanceUntilIdle()
+        // No trackInFlight — empty in-flight set.
+        runner.run(SideEffectIntent.PollActiveHistory)
+        advanceUntilIdle()
+        assertTrue(collected.isEmpty(), "PollActiveHistory with no in-flight ids must not emit")
+        // Schedule a timer to confirm the runner is still functional.
+        runner.run(SideEffectIntent.ScheduleTimer(TimerTick.ReconnectFallbackPoll, millis = 1))
+        advanceTimeBy(2)
         advanceUntilIdle()
         assertEquals(1, collected.size)
         assertIs<ConnectionInput.Timer>(collected[0])
@@ -196,18 +204,32 @@ class ConnectionEffectRunnerTest {
         val runner = makeRunner(scope = TestScope(testScheduler))
         val errors = mutableListOf<ConnectError>()
         val job = launch { runner.emittedErrors.take(1).collect { errors += it } }
+        advanceUntilIdle()
         runner.run(SideEffectIntent.EmitError(ConnectError.NOT_COMFYUI))
         advanceUntilIdle()
         assertEquals(listOf(ConnectError.NOT_COMFYUI), errors)
         job.cancel()
     }
 
+    @Test fun emitted_errors_replay_delivers_value_to_late_subscriber() = runTest {
+        // Regression: the errorFlow uses replay = 1 (per @Lily PR #6
+        // review msg `0e87febf`) so a UI subscribing AFTER the error
+        // was already classified still sees it.
+        val runner = makeRunner(scope = TestScope(testScheduler))
+        runner.run(SideEffectIntent.EmitError(ConnectError.WRONG_PORT_404))
+        advanceUntilIdle()
+        val errors = mutableListOf<ConnectError>()
+        val job = launch { runner.emittedErrors.take(1).collect { errors += it } }
+        advanceUntilIdle()
+        assertEquals(listOf(ConnectError.WRONG_PORT_404), errors)
+        job.cancel()
+    }
+
     @Test fun untrack_inflight_updates_snapshot_synchronously() {
-        // Test the data structure directly — going through PollActiveHistory
-        // would launch a coroutine that crosses the Ktor MockEngine
-        // boundary on a different dispatcher than the TestScope's, which
-        // makes the indirect "did the fanout poll exactly p-2?" assertion
-        // racy. The deterministic seam is `snapshotInFlight()`.
+        // Test the data structure directly — going through
+        // PollActiveHistory + Ktor MockEngine on TestScope causes
+        // dispatcher races (per @Lily msg `14983d87`). The
+        // `snapshotInFlight()` seam exposes the deterministic state.
         val runner = makeRunner(scope = TestScope())
         runner.trackInFlight("p-1")
         runner.trackInFlight("p-2")
@@ -227,15 +249,15 @@ class ConnectionEffectRunnerTest {
             ws = ws,
             scope = TestScope(testScheduler),
         )
-        runner.run(SideEffectIntent.OpenWs(clientId = "client-uuid-42"))
-        advanceUntilIdle()
-        // Push two frames through the fake source.
-        val ev1 = WsEvent.ExecutionStart(promptId = "p-1")
-        val ev2 = WsEvent.Progress(promptId = "p-1", node = "3", value = 5, max = 20)
         val collected = mutableListOf<ConnectionInput>()
         val collectJob = launch {
             runner.producedInputs.take(2).collect { collected += it }
         }
+        advanceUntilIdle()
+        runner.run(SideEffectIntent.OpenWs(clientId = "client-uuid-42"))
+        advanceUntilIdle()
+        val ev1 = WsEvent.ExecutionStart(promptId = "p-1")
+        val ev2 = WsEvent.Progress(promptId = "p-1", node = "3", value = 5, max = 20)
         ws.frames.emit(ev1)
         ws.frames.emit(ev2)
         advanceUntilIdle()
@@ -255,13 +277,14 @@ class ConnectionEffectRunnerTest {
             ws = ws,
             scope = TestScope(testScheduler),
         )
-        runner.run(SideEffectIntent.OpenWs(clientId = "any"))
-        advanceUntilIdle()
         val collected = mutableListOf<ConnectionInput>()
         val job = launch {
             runner.producedInputs.take(1).collect { collected += it }
         }
         advanceUntilIdle()
+        runner.run(SideEffectIntent.OpenWs(clientId = "any"))
+        advanceUntilIdle()
+        assertEquals(1, collected.size)
         val drop = assertIs<ConnectionInput.Ws>(collected.single())
         assertEquals(WsDropReason.LAN_FLAKE, drop.droppedReason)
         assertEquals(null, drop.event)
