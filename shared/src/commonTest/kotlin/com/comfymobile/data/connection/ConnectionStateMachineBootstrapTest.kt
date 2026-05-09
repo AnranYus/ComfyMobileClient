@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -167,29 +168,19 @@ class ConnectionStateMachineBootstrapTest {
         bootstrap.stop()
     }
 
-    @Test fun AlwaysOnlineNetworkMonitor_default_is_online_and_wifi() {
+    @Test fun AlwaysOnlineNetworkMonitor_default_is_online_and_wifi() = runTest {
         val monitor = AlwaysOnlineNetworkMonitor()
-        // The state Flow is a StateFlow; test via the public Flow API.
-        val collected = mutableListOf<NetworkState>()
-        runTest {
-            kotlinx.coroutines.launch {
-                monitor.state.collect { collected += it }
-            }
-            runCurrent()
-        }
-        assertEquals(NetworkState(online = true, wifi = true), collected.first())
+        // Bounded collect via first() — avoids leaving an infinite
+        // collector running past the test body. (Per @Lily PR #15
+        // review msg `984bed0d`.)
+        val first = monitor.state.first()
+        assertEquals(NetworkState(online = true, wifi = true), first)
     }
 
-    @Test fun AlwaysForegroundedLifecycleMonitor_default_is_true() {
+    @Test fun AlwaysForegroundedLifecycleMonitor_default_is_true() = runTest {
         val monitor = AlwaysForegroundedLifecycleMonitor()
-        val collected = mutableListOf<Boolean>()
-        runTest {
-            kotlinx.coroutines.launch {
-                monitor.foregrounded.collect { collected += it }
-            }
-            runCurrent()
-        }
-        assertEquals(true, collected.first())
+        val first = monitor.foregrounded.first()
+        assertEquals(true, first)
     }
 
     private fun ConnectionInput.Network.toState(): NetworkState =
