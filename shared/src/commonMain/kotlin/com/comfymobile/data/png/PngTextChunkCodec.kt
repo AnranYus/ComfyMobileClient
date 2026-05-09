@@ -87,11 +87,15 @@ object PngTextChunkCodec {
      * Find the first `tEXt` chunk whose keyword equals [keyword] and
      * return its text. Returns null when no chunk matches.
      *
-     * @throws PngFormatException on a syntactically invalid PNG.
+     * @throws PngFormatException on a syntactically invalid PNG —
+     *         including the case where the byte stream is truncated
+     *         before IEND. PNG spec requires every valid PNG to end
+     *         in IEND; rejecting "no IEND" here keeps malformed
+     *         payloads from silently being treated as "valid PNG, no
+     *         metadata". (Per @Lily PR #8 review msg `ee8e36e3`.)
      */
     fun extract(png: ByteArray, keyword: String): String? {
-        verifySignature(png)
-        val chunks = scanChunks(png)
+        val chunks = scanAndRequireIend(png)
         for (chunk in chunks) {
             if (!chunk.type.contentEquals(TEXT_TYPE)) continue
             val pair = parseTextChunk(chunk.data) ?: continue
@@ -104,10 +108,12 @@ object PngTextChunkCodec {
      * Return all `tEXt` chunks as keyword → text. If the same keyword
      * appears multiple times the first one wins (PNG spec allows
      * multiple but the ComfyUI convention has one per keyword).
+     *
+     * @throws PngFormatException on a syntactically invalid PNG,
+     *         including missing-IEND.
      */
     fun list(png: ByteArray): Map<String, String> {
-        verifySignature(png)
-        val chunks = scanChunks(png)
+        val chunks = scanAndRequireIend(png)
         val out = LinkedHashMap<String, String>()
         for (chunk in chunks) {
             if (!chunk.type.contentEquals(TEXT_TYPE)) continue
@@ -116,6 +122,21 @@ object PngTextChunkCodec {
             if (kw !in out) out[kw] = txt
         }
         return out
+    }
+
+    /**
+     * Verify signature, parse all chunks, and require IEND to be
+     * present. Used by every read path so callers cannot consume a
+     * "valid PNG-without-IEND" — that is, a stream that's been
+     * truncated just before the terminating chunk.
+     */
+    private fun scanAndRequireIend(png: ByteArray): List<Chunk> {
+        verifySignature(png)
+        val chunks = scanChunks(png)
+        if (chunks.none { it.type.contentEquals(IEND_TYPE) }) {
+            throw PngFormatException("invalid PNG: missing IEND chunk")
+        }
+        return chunks
     }
 
     // ----------------------------------------------------------------- internals
