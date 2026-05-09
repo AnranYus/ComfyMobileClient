@@ -21,11 +21,13 @@ import io.ktor.http.headersOf
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.utils.io.ByteReadChannel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
@@ -93,7 +95,7 @@ class ConnectAttemptCoordinatorTest {
         vm.onPortChanged("8188")
         vm.onFriendlyNameChanged("MacBook")
         vm.onSubmit()
-        runCurrent()
+        advanceUntilIdle()
 
         // History updated.
         val saved = store.getById("192.168.1.10:8188")
@@ -115,6 +117,10 @@ class ConnectAttemptCoordinatorTest {
             "Expected a Retry dispatch on success, got: ${facade.dispatched}",
         )
         coord.stop()
+        // Cancel the long-lived collectors (ConnectViewModel.screenState
+        // uses stateIn(SharingStarted.Eagerly)) so runTest doesn't
+        // raise UncompletedCoroutinesError.
+        coroutineContext.cancelChildren()
     }
 
     @Test fun successful_probe_when_in_Lost_state_dispatches_Retry_to_recover() = runTest {
@@ -153,9 +159,13 @@ class ConnectAttemptCoordinatorTest {
         vm.onHostChanged("192.168.1.10")
         vm.onPortChanged("8188")
         vm.onSubmit()
-        runCurrent()
+        advanceUntilIdle()
         assertTrue(facade.dispatched.contains(ConnectionInput.Retry))
         coord.stop()
+        // Cancel the long-lived collectors (ConnectViewModel.screenState
+        // uses stateIn(SharingStarted.Eagerly)) so runTest doesn't
+        // raise UncompletedCoroutinesError.
+        coroutineContext.cancelChildren()
     }
 
     @Test fun probe_with_404_dispatches_WRONG_PORT_404() = runTest {
@@ -182,7 +192,7 @@ class ConnectAttemptCoordinatorTest {
         vm.onHostChanged("192.168.1.10")
         vm.onPortChanged("8188")
         vm.onSubmit()
-        runCurrent()
+        advanceUntilIdle()
 
         val attempts = facade.dispatched.filterIsInstance<ConnectionInput.ConnectAttempt>()
         assertEquals(1, attempts.size)
@@ -190,6 +200,10 @@ class ConnectAttemptCoordinatorTest {
         // Server NOT saved on failure.
         assertEquals(null, store.getById("192.168.1.10:8188"))
         coord.stop()
+        // Cancel the long-lived collectors (ConnectViewModel.screenState
+        // uses stateIn(SharingStarted.Eagerly)) so runTest doesn't
+        // raise UncompletedCoroutinesError.
+        coroutineContext.cancelChildren()
     }
 
     @Test fun probe_with_non_comfyui_body_dispatches_NOT_COMFYUI() = runTest {
@@ -218,12 +232,16 @@ class ConnectAttemptCoordinatorTest {
         vm.onHostChanged("192.168.1.10")
         vm.onPortChanged("8188")
         vm.onSubmit()
-        runCurrent()
+        advanceUntilIdle()
 
         val attempts = facade.dispatched.filterIsInstance<ConnectionInput.ConnectAttempt>()
         assertEquals(1, attempts.size)
         assertEquals(ConnectError.NOT_COMFYUI, attempts.single().classified)
         coord.stop()
+        // Cancel the long-lived collectors (ConnectViewModel.screenState
+        // uses stateIn(SharingStarted.Eagerly)) so runTest doesn't
+        // raise UncompletedCoroutinesError.
+        coroutineContext.cancelChildren()
     }
 
     @Test fun probe_failure_does_NOT_set_active_server() = runTest {
@@ -252,9 +270,13 @@ class ConnectAttemptCoordinatorTest {
         vm.onHostChanged("192.168.1.10")
         vm.onPortChanged("8188")
         vm.onSubmit()
-        runCurrent()
+        advanceUntilIdle()
         assertEquals(null, activeServer.current.value)
         coord.stop()
+        // Cancel the long-lived collectors (ConnectViewModel.screenState
+        // uses stateIn(SharingStarted.Eagerly)) so runTest doesn't
+        // raise UncompletedCoroutinesError.
+        coroutineContext.cancelChildren()
     }
 
     @Test fun coordinator_propagates_CancellationException() = runTest {
@@ -294,7 +316,7 @@ class ConnectAttemptCoordinatorTest {
         vm.onHostChanged("192.168.1.10")
         vm.onPortChanged("8188")
         vm.onSubmit()
-        runCurrent()
+        advanceUntilIdle()
         // Coordinator's launchIn job should be cancelled by the
         // propagated CancellationException; no ConnectAttempt
         // dispatched (because the probe was cancelled, not failed).
@@ -303,6 +325,10 @@ class ConnectAttemptCoordinatorTest {
             "Expected NO ConnectAttempt on cancellation, got: ${facade.dispatched}",
         )
         coord.stop()
+        // Cancel the long-lived collectors (ConnectViewModel.screenState
+        // uses stateIn(SharingStarted.Eagerly)) so runTest doesn't
+        // raise UncompletedCoroutinesError.
+        coroutineContext.cancelChildren()
     }
 
     @Test fun submit_with_empty_friendly_name_falls_back_to_host_label() = runTest {
@@ -334,9 +360,13 @@ class ConnectAttemptCoordinatorTest {
         vm.onPortChanged("8188")
         // No friendly name set.
         vm.onSubmit()
-        runCurrent()
+        advanceUntilIdle()
 
         assertEquals("192.168.1.10", store.getById("192.168.1.10:8188")?.label)
         coord.stop()
+        // Cancel the long-lived collectors (ConnectViewModel.screenState
+        // uses stateIn(SharingStarted.Eagerly)) so runTest doesn't
+        // raise UncompletedCoroutinesError.
+        coroutineContext.cancelChildren()
     }
 }
