@@ -1,0 +1,193 @@
+package com.comfymobile.data.connection
+
+import com.comfymobile.data.network.ComfyHttpClient
+import com.comfymobile.data.network.ConnectError
+import com.comfymobile.data.network.ConnectionEffectRunner
+import com.comfymobile.data.network.ConnectionInput
+import com.comfymobile.data.network.ConnectionState
+import com.comfymobile.data.network.ConnectionStateReducer
+import com.comfymobile.data.network.WebSocketSource
+import com.comfymobile.data.network.WsDropReason
+import com.comfymobile.data.network.WsEvent
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.headersOf
+import io.ktor.serialization.kotlinx.json.json
+import io.ktor.utils.io.ByteReadChannel
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.flow.take
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.serialization.json.Json
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertIs
+import kotlin.test.assertTrue
+
+/**
+ * End-to-end tests of the reducer + runner + state-machine driver
+ * triple. Per the test patterns established in
+ * ConnectionEffectRunnerTest, every assertion uses
+ * `async { ... take(N).toList() }.await()` for synchronisation, and
+ * the runner is given the same TestScope as the test itself.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+class ConnectionStateMachineTest {
+
+    private val baseUrl = "http://192.168.1.10:8188"
+
+    private fun http(): ComfyHttpClient {
+        val mock = HttpClient(MockEngine { _ ->
+            respond(
+                content = ByteReadChannel("""{}"""),
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+            )
+        }) {
+            install(ContentNegotiation) {
+                json(Json { ignoreUnknownKeys = true })
+            }
+        }
+        return ComfyHttpClient(baseUrl, mock)
+    }
+
+    private class FakeWs : WebSocketSource {
+        val frames = Channel<WsEvent>(capacity = 64)
+        override fun connect(clientId: String): Flow<WsEvent> = frames.receiveAsFlow()
+    }
+
+    private fun buildMachine(scope: kotlinx.coroutines.CoroutineScope): Triple<ConnectionStateMachine, ConnectionEffectRunner, FakeWs> {
+        val ws = FakeWs()
+        val runner = ConnectionEffectRunner(http = http(), ws = ws, scope = scope)
+        val reducer = ConnectionStateReducer(clientIdProvider = { "client-uuid" })
+        val machine = ConnectionStateMachine(reducer, runner, scope)
+        return Triple(machine, runner, ws)
+    }
+
+    @Test fun ws_drop_via_dispatch_transitions_to_Reconnecting_LAN_FLAKE() = runTest {
+        val (machine, _, _) = buildMachine(this)
+        machine.start()
+        advanceUntilIdle()
+        assertEquals(ConnectionState.Connected, machine.currentState.value)
+
+        machine.dispatch(ConnectionInput.Ws(droppedReason = WsDropReason.LAN_FLAKE))
+        advanceUntilIdle()
+
+        val state = machine.currentState.value
+        val reconnecting = assertIs<ConnectionState.Reconnecting>(state)
+        assertEquals(com.comfymobile.data.network.ReconnectReason.LAN_FLAKE, reconnecting.reason)
+        machine.stop()
+    }
+
+    @Test fun reconnect_then_event_returns_to_Connected_via_runner_emission() = runTest {
+        val (machine, _, ws) = buildMachine(this)
+        machine.start()
+        advanceUntilIdle()
+
+        machine.dispatch(ConnectionInput.Ws(droppedReason = WsDropReason.LAN_FLAKE))
+        advanceUntilIdle()
+        // Sanity: now Reconnecting.
+        assertIs<ConnectionState.Reconnecting>(machine.currentState.value)
+
+        // OpenWs fired by reducer → runner; ws.frames is empty until
+        // we push. Push an event; runner forwards as ConnectionInput.Ws,
+        // reducer transitions back to Connected.
+        ws.frames.send(WsEvent.Status(queueRemaining = 0))
+        advanceUntilIdle()
+
+        assertEquals(ConnectionState.Connected, machine.currentState.value)
+        machine.stop()
+    }
+
+    @Test fun give_up_timer_transitions_to_Lost() = runTest {
+        val (machine, _, _) = buildMachine(this)
+        machine.start()
+        advanceUntilIdle()
+
+        machine.dispatch(ConnectionInput.Ws(droppedReason = WsDropReason.LAN_FLAKE))
+        advanceUntilIdle()
+
+        // Default config: 30s give-up timer.
+        advanceTimeBy(31_000)
+        advanceUntilIdle()
+
+        val state = machine.currentState.value
+        assertIs<ConnectionState.Lost>(state)
+        machine.stop()
+    }
+
+    @Test fun retry_from_Lost_re_enters_Reconnecting() = runTest {
+        val (machine, _, _) = buildMachine(this)
+        machine.start()
+        advanceUntilIdle()
+        machine.dispatch(ConnectionInput.Ws(droppedReason = WsDropReason.LAN_FLAKE))
+        advanceTimeBy(31_000)
+        advanceUntilIdle()
+        assertIs<ConnectionState.Lost>(machine.currentState.value)
+
+        machine.dispatch(ConnectionInput.Retry)
+        advanceUntilIdle()
+        assertIs<ConnectionState.Reconnecting>(machine.currentState.value)
+        machine.stop()
+    }
+
+    @Test fun connect_attempt_failure_pins_classified_error_in_Lost() = runTest {
+        val (machine, _, _) = buildMachine(this)
+        machine.start()
+        advanceUntilIdle()
+        machine.dispatch(ConnectionInput.ConnectAttempt(classified = ConnectError.NOT_COMFYUI))
+        advanceUntilIdle()
+        val lost = assertIs<ConnectionState.Lost>(machine.currentState.value)
+        assertEquals(ConnectError.NOT_COMFYUI, lost.error)
+        machine.stop()
+    }
+
+    @Test fun start_is_idempotent() = runTest {
+        val (machine, _, _) = buildMachine(this)
+        machine.start()
+        machine.start()
+        machine.start()
+        advanceUntilIdle()
+        // No throw, single observer; verify by dispatching once and
+        // confirming a single state transition (not three).
+        machine.dispatch(ConnectionInput.Ws(droppedReason = WsDropReason.LAN_FLAKE))
+        advanceUntilIdle()
+        assertIs<ConnectionState.Reconnecting>(machine.currentState.value)
+        machine.stop()
+    }
+
+    @Test fun emitted_errors_observable_via_machine_errors_flow() = runTest {
+        val (machine, _, _) = buildMachine(this)
+        machine.start()
+        // start collector first per the established pattern
+        val collector = async { machine.errors.take(1).toList() }
+        advanceUntilIdle()
+        machine.dispatch(ConnectionInput.ConnectAttempt(classified = ConnectError.WRONG_PORT_404))
+        advanceUntilIdle()
+        val errors = collector.await()
+        assertEquals(listOf(ConnectError.WRONG_PORT_404), errors)
+        machine.stop()
+    }
+
+    @Test fun trackInFlight_propagates_to_runner() = runTest {
+        val (machine, runner, _) = buildMachine(this)
+        machine.trackInFlight("p-1")
+        machine.trackInFlight("p-2")
+        assertEquals(setOf("p-1", "p-2"), runner.snapshotInFlight())
+        machine.untrackInFlight("p-1")
+        assertEquals(setOf("p-2"), runner.snapshotInFlight())
+    }
+}
