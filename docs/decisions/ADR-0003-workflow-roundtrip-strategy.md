@@ -39,7 +39,7 @@ Non-whitelist (unknown) nodes:
 
 ### 4. Whitelist is data-driven, not hardcoded
 
-Defined as `NodeDescriptor` table loaded from external config. Adding nodes is a config change, not a code change. UI controls supported: 8 types (Number, Integer, Slider, Toggle, SingleLineText, MultilineText, Dropdown, ModelPicker, ImagePicker, Hidden) — sufficient for the MVP whitelist; no need to extend.
+Defined as `NodeDescriptor` table loaded from external config. Adding nodes is a config change, not a code change. UI controls supported: 10 types (Number, Integer, Slider, Toggle, SingleLineText, MultilineText, Dropdown, ModelPicker, ImagePicker, Hidden) plus 3 presentation-layer variants (Integer-with-stepper, Seed special with 🎲/🔒, Prompt rich autocomplete) which do not require descriptor-schema changes — sufficient for the MVP whitelist; no need to extend further.
 
 ### 5. Dynamic enum sourcing
 

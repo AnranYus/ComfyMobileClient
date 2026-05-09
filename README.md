@@ -48,8 +48,8 @@ Detailed module layout in `docs/architecture/T0.2-kmp-skeleton-and-rendering.md`
 
 ## Backend compatibility
 
-- Tested against ComfyUI master (HTTP REST + WebSocket).
-- Endpoints used: `/system_stats`, `/object_info`, `/models/*`, `/embeddings`, `/prompt`, `/queue`, `/interrupt`, `/history`, `/view`, `/upload/image`, `/ws`.
+- Designed and researched against ComfyUI master (HTTP REST + WebSocket). End-to-end integration tests are part of Phase 1 — no runnable client yet.
+- Endpoints planned: `/system_stats`, `/object_info`, `/models/*`, `/embeddings`, `/prompt`, `/queue`, `/interrupt`, `/history`, `/view`, `/upload/image`, `/ws`.
 
 See `docs/architecture/T0.1-comfyui-integration.md` for the full reference.
 
