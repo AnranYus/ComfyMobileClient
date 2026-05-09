@@ -31,6 +31,21 @@ enum class ConnectError {
      * (`/system_stats` returned 404). */
     WRONG_PORT_404,
 
+    /**
+     * State machine asked the runner to perform a side effect
+     * (e.g. `OpenWs`, `PollHistory`) while no active server is
+     * selected (`ActiveServerHolder.current.value == null`). The
+     * runner emits this **without** routing to a default URL or
+     * the previously-active server, so the UI surfaces an explicit
+     * "pick a server" message instead of silently retrying against
+     * the wrong endpoint.
+     *
+     * Per @Ores `b522a9f3` / @Lily `60a7e64a` (PR #18 thread): this
+     * is a first-class user-facing error, not a generic UNKNOWN —
+     * separating it keeps copy and analytics distinguishable.
+     */
+    NO_ACTIVE_SERVER,
+
     /** Catch-all bucket for unexpected throwables. UX still has to
      * render *something*. */
     UNKNOWN,

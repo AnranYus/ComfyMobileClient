@@ -1,5 +1,7 @@
 package com.comfymobile.data.network
 
+import com.comfymobile.data.connect.ActiveServerHolder
+import com.comfymobile.domain.server.ServerInfo
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
@@ -10,6 +12,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.consumeAsFlow
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
@@ -27,13 +30,39 @@ import kotlinx.coroutines.launch
  *  - [SideEffectIntent.CancelTimer]       → cancels the corresponding job
  *  - [SideEffectIntent.EmitError]         → forwards on [emittedErrors] for the UI to consume
  *
+ * ### Active-server awareness (T1.4b part 3d-ii, @Lily PR #18 thread)
+ *
+ * The runner does NOT capture a single `ComfyHttpClient` /
+ * `WebSocketSource` at construction. Instead it takes:
+ *  - [activeServer]: [ActiveServerHolder] — the source of truth for
+ *    which server the user is currently connected to.
+ *  - [httpClientFactory] / [webSocketSourceFactory]: per-server
+ *    factories invoked at effect-run time so each effect uses the
+ *    *current* active server's baseUrl, not a stale one.
+ *
+ * Two contract invariants come from this design:
+ *  1. **No active server → explicit error, no IO.** Any side effect
+ *     that needs a server (`OpenWs`, `PollHistory`, `PollActiveHistory`)
+ *     while [ActiveServerHolder.current] is `null` emits
+ *     [ConnectError.NO_ACTIVE_SERVER] on [emittedErrors] and does
+ *     **not** route to a default URL or any previously-active server.
+ *     Per @Lily / @Ores final convergence (PR #18 thread msg
+ *     `b522a9f3` / `60a7e64a`).
+ *  2. **Active-server change cancels in-flight IO.** A server-observer
+ *     job watches [ActiveServerHolder.current] and cancels the WS
+ *     session and any in-flight history-poll jobs whenever the active
+ *     server changes (or becomes null), so a switch to a new server
+ *     never leaves a half-open WS or pending poll talking to the old
+ *     baseUrl.
+ *
  * Tests inject a `CoroutineScope` backed by `TestScope` and drive the
  * runner with virtual time, asserting on the inputs the runner sends
  * back into [producedInputs].
  */
 class ConnectionEffectRunner(
-    private val http: ComfyHttpClient,
-    private val ws: WebSocketSource,
+    private val activeServer: ActiveServerHolder,
+    private val httpClientFactory: (ServerInfo) -> ComfyHttpClient,
+    private val webSocketSourceFactory: (ServerInfo) -> WebSocketSource,
     private val scope: CoroutineScope,
 ) {
 
@@ -69,6 +98,28 @@ class ConnectionEffectRunner(
     private val errorFlow = MutableSharedFlow<ConnectError>(replay = 1, extraBufferCapacity = 16)
     private val timerJobs = mutableMapOf<TimerTick, Job>()
     private var wsJob: Job? = null
+    /**
+     * In-flight history poll jobs. Tracked so an active-server change
+     * can cancel polls that would otherwise resolve against the old
+     * baseUrl. Each job removes itself on completion.
+     */
+    private val pollJobs = mutableSetOf<Job>()
+
+    /** Server observer; cancels server-bound IO on active-server change. */
+    private var serverObserverJob: Job? = scope.launch {
+        // `drop(1)` because the StateFlow's initial value is the
+        // current snapshot — we only react to *changes*. Without this
+        // we would cancel nothing on first emission anyway, but the
+        // semantics are clearer by skipping it explicitly.
+        var lastObservedServerId: String? = activeServer.current.value?.serverId
+        activeServer.current.drop(1).collect { newServer ->
+            val newId = newServer?.serverId
+            if (newId != lastObservedServerId) {
+                cancelServerBoundIo()
+                lastObservedServerId = newId
+            }
+        }
+    }
 
     fun trackInFlight(promptId: String) {
         activePromptIds.add(promptId)
@@ -87,9 +138,18 @@ class ConnectionEffectRunner(
 
     fun run(intent: SideEffectIntent) {
         when (intent) {
-            is SideEffectIntent.OpenWs -> openWs(intent.clientId)
-            is SideEffectIntent.PollHistory -> pollHistory(intent.promptId)
-            SideEffectIntent.PollActiveHistory -> activePromptIds.toList().forEach(::pollHistory)
+            is SideEffectIntent.OpenWs -> withActiveServerOrEmit { server ->
+                openWs(server, intent.clientId)
+            }
+            is SideEffectIntent.PollHistory -> withActiveServerOrEmit { server ->
+                pollHistory(server, intent.promptId)
+            }
+            SideEffectIntent.PollActiveHistory -> withActiveServerOrEmit { server ->
+                activePromptIds.toList().forEach { pollHistory(server, it) }
+            }
+            // Timers are protocol-level (reconnect cadence); they do
+            // not depend on the active server, so we run them
+            // unconditionally.
             is SideEffectIntent.ScheduleTimer -> scheduleTimer(intent.tick, intent.millis)
             is SideEffectIntent.CancelTimer -> cancelTimer(intent.tick)
             is SideEffectIntent.EmitError -> {
@@ -101,16 +161,50 @@ class ConnectionEffectRunner(
     /** Cancels in-flight timers + WS job. Use when the surrounding
      *  scope is being torn down (e.g. user signs out / app exits). */
     suspend fun shutdown() {
+        serverObserverJob?.cancelAndJoin()
+        serverObserverJob = null
         timerJobs.values.forEach { runCatching { it.cancelAndJoin() } }
         timerJobs.clear()
         wsJob?.cancelAndJoin()
         wsJob = null
+        val pollSnapshot = pollJobs.toList()
+        pollJobs.clear()
+        pollSnapshot.forEach { runCatching { it.cancelAndJoin() } }
     }
 
     // ----------------------------------------------------------------- private
 
-    private fun openWs(clientId: String) {
+    /**
+     * Snapshot [ActiveServerHolder.current] and either call [block]
+     * with the resolved [ServerInfo] or — when no server is active —
+     * emit [ConnectError.NO_ACTIVE_SERVER] without performing any IO.
+     *
+     * Per @Lily PR #18 thread msg `60a7e64a`: this is a first-class
+     * user-facing error path, NOT a silent no-op. The state machine
+     * reducer transitions to `Lost(NO_ACTIVE_SERVER)` and the UI
+     * surfaces @Ores's "Pick a server or enter again" copy.
+     */
+    private inline fun withActiveServerOrEmit(block: (ServerInfo) -> Unit) {
+        val server = activeServer.current.value
+        if (server == null) {
+            errorFlow.tryEmit(ConnectError.NO_ACTIVE_SERVER)
+            return
+        }
+        block(server)
+    }
+
+    /** Cancels in-flight server-bound IO (WS + history polls). */
+    private suspend fun cancelServerBoundIo() {
+        wsJob?.cancelAndJoin()
+        wsJob = null
+        val pollSnapshot = pollJobs.toList()
+        pollJobs.clear()
+        pollSnapshot.forEach { runCatching { it.cancelAndJoin() } }
+    }
+
+    private fun openWs(server: ServerInfo, clientId: String) {
         wsJob?.cancel()
+        val ws = webSocketSourceFactory(server)
         wsJob = scope.launch {
             ws.connect(clientId)
                 .onEach { event ->
@@ -139,8 +233,9 @@ class ConnectionEffectRunner(
         timerJobs.remove(tick)
     }
 
-    private fun pollHistory(promptId: String) {
-        scope.launch {
+    private fun pollHistory(server: ServerInfo, promptId: String) {
+        val http = httpClientFactory(server)
+        val job = scope.launch {
             val result = try {
                 val entry = http.getHistoryEntry(promptId)
                 when {
@@ -165,6 +260,8 @@ class ConnectionEffectRunner(
                 ConnectionInput.HistoryProbe(promptId = promptId, result = result)
             )
         }
+        pollJobs.add(job)
+        job.invokeOnCompletion { pollJobs.remove(job) }
     }
 
     // Suppress unused-import warning for `consumeAsFlow` (kept for future

@@ -1,5 +1,6 @@
 package com.comfymobile.data.connection
 
+import com.comfymobile.data.connect.ActiveServerHolder
 import com.comfymobile.data.network.ComfyHttpClient
 import com.comfymobile.data.network.ConnectError
 import com.comfymobile.data.network.ConnectionEffectRunner
@@ -9,6 +10,7 @@ import com.comfymobile.data.network.ConnectionStateReducer
 import com.comfymobile.data.network.WebSocketSource
 import com.comfymobile.data.network.WsDropReason
 import com.comfymobile.data.network.WsEvent
+import com.comfymobile.domain.server.ServerInfo
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -72,7 +74,27 @@ class ConnectionStateMachineTest {
 
     private fun buildMachine(scope: kotlinx.coroutines.CoroutineScope): Triple<ConnectionStateMachine, ConnectionEffectRunner, FakeWs> {
         val ws = FakeWs()
-        val runner = ConnectionEffectRunner(http = http(), ws = ws, scope = scope)
+        // Pre-populated active-server holder so the runner's null-guard
+        // never triggers in machine-level tests. Active-server-aware
+        // behaviour (null guard, server switch) is covered by
+        // ConnectionEffectRunnerTest, not here.
+        val activeServer = ActiveServerHolder().also {
+            it.setActive(
+                ServerInfo(
+                    serverId = "192.168.1.10:8188",
+                    host = "192.168.1.10",
+                    port = 8188,
+                    label = "test",
+                    lastConnectedAtEpochMs = 0L,
+                ),
+            )
+        }
+        val runner = ConnectionEffectRunner(
+            activeServer = activeServer,
+            httpClientFactory = { _ -> http() },
+            webSocketSourceFactory = { _ -> ws },
+            scope = scope,
+        )
         val reducer = ConnectionStateReducer(clientIdProvider = { "client-uuid" })
         val machine = ConnectionStateMachine(reducer, runner, scope)
         return Triple(machine, runner, ws)

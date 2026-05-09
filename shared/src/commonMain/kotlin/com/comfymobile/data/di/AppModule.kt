@@ -3,10 +3,14 @@ package com.comfymobile.data.di
 import com.comfymobile.data.connect.ActiveServerHolder
 import com.comfymobile.data.connect.ConnectAttemptCoordinator
 import com.comfymobile.data.connect.SystemStatsProbe
+import com.comfymobile.data.connection.ConnectionStateMachine
+import com.comfymobile.data.connection.ConnectionStateMachineBootstrap
+import com.comfymobile.data.connection.ConnectionStateMachineFacade
 import com.comfymobile.data.network.ComfyHttpClient
 import com.comfymobile.data.network.ComfyWebSocketClient
+import com.comfymobile.data.network.ConnectionEffectRunner
+import com.comfymobile.data.network.ConnectionStateReducer
 import com.comfymobile.data.network.WebSocketSource
-import com.comfymobile.data.persistence.JobReconciler
 import com.comfymobile.data.persistence.SettingsServerHistoryStore
 import com.comfymobile.data.persistence.SqlDelightJobRepository
 import com.comfymobile.data.platform.PlatformContext
@@ -14,6 +18,8 @@ import com.comfymobile.data.platform.createSettings
 import com.comfymobile.data.platform.createSqlDriver
 import com.comfymobile.data.platform.nowEpochMs
 import com.comfymobile.db.ComfyMobileDb
+import com.comfymobile.domain.connection.LifecycleMonitor
+import com.comfymobile.domain.connection.NetworkMonitor
 import com.comfymobile.domain.job.JobRepository
 import com.comfymobile.domain.server.ServerHistoryStore
 import io.ktor.client.HttpClient
@@ -31,27 +37,29 @@ import org.koin.dsl.module
 /**
  * Application-scoped Koin module. Builds the long-lived, single-
  * instance commonMain objects: SqlDriver, ComfyMobileDb,
- * repositories, ActiveServerHolder, per-server HTTP / WS factories.
+ * repositories, ActiveServerHolder, per-server HTTP / WS factories,
+ * and (since T1.4b part 3d-ii) the connection state-machine triple
+ * (Reducer / Runner / Machine / Bootstrap).
  *
- * **NOT bound here** (deferred to T1.4b part 3d-ii):
- *  - `ConnectionStateReducer` / `ConnectionEffectRunner` /
- *    `ConnectionStateMachine` / `ConnectionStateMachineBootstrap` —
- *    these need a real active-server `ComfyHttpClient` /
- *    `WebSocketSource` (per @Lily PR #18 review msg `75c88c17`,
- *    binding them to a localhost stub here would silently route
- *    history-poll effects to nothing). Part 3d-ii either rebuilds
- *    them per active server or threads `ActiveServerHolder` into
- *    the runner so it picks the right baseUrl at effect-run time.
- *  - `PlatformContext` / `NetworkMonitor` / `LifecycleMonitor` —
- *    bound by platform Koin modules in `androidMain` / `iosMain`.
+ * **NOT bound here** (platform Koin modules supply these):
+ *  - `PlatformContext` — Android binds it with `applicationContext`,
+ *    iOS with the empty placeholder actual.
+ *  - `NetworkMonitor` / `LifecycleMonitor` — Android binds
+ *    `AndroidNetworkMonitor` + `AndroidLifecycleMonitor`; iOS binds
+ *    `IosNetworkMonitor` + `IosLifecycleMonitor`. Both interfaces
+ *    so commonMain can depend on them via DI without expect/actual.
  *  - `NodeDescriptorRegistry` — its load is suspending
  *    (`Res.readBytes`); App entry point loads + `getKoin().declare`s
  *    it at startup.
  *
- * The Compose `App()` entry point fetches the
+ * The Compose `App()` entry point (or `MainActivity` /
+ * `iOSApp.swift`) fetches the
  * [com.comfymobile.presentation.connection.ConnectViewModel] factory
- * from this module via `koinInject` (or platform glue) once
- * everything else is bound.
+ * from this module via Koin once everything else is bound, and is
+ * also responsible for calling
+ * [ConnectionStateMachineBootstrap.start] / `.stop` at the right
+ * lifecycle points. Per @Lily PR #18 thread (`62385887`):
+ * `start()` MUST be explicit and idempotent, never via `init { }`.
  */
 fun appModule(): Module = module {
 
@@ -124,18 +132,78 @@ fun appModule(): Module = module {
         )
     }
 
-    // ----------------------------------------------------------------- coordinators / view models
+    // ----------------------------------------------------------------- state machine triple
     //
-    // Note: ConnectionStateReducer / ConnectionEffectRunner /
-    // ConnectionStateMachine / ConnectionStateMachineBootstrap are
-    // intentionally NOT bound in this module — they need an
-    // active-server-aware HTTP / WS plumbing that part 3d-ii
-    // assembles on top of `ActiveServerHolder`. ConnectViewModel and
-    // ConnectAttemptCoordinator both depend on the
-    // ConnectionStateMachineFacade binding which part 3d-ii will
-    // also provide. They are still declared as `factory` here so
-    // commonTest compiles; production callers in part 3d-ii must
-    // make sure the facade is bound before resolving.
+    // Per @Lily PR #18 thread (`60a7e64a`): the Runner is
+    // active-server-aware via factories on the active server. With no
+    // active server it emits `ConnectError.NO_ACTIVE_SERVER` and does
+    // not touch IO; on active-server change it cancels in-flight
+    // server-bound IO so the new baseUrl takes over cleanly. The DI
+    // wiring below preserves that contract by passing
+    // `ActiveServerHolder` + per-server factories instead of locking
+    // a single baseUrl in.
+
+    single<ConnectionStateReducer> {
+        ConnectionStateReducer(
+            // Stable client-id per process. The Ktor WebSocket
+            // /ws?clientId=... handshake uses this; ComfyUI doesn't
+            // require it to be a UUID, just a stable identifier.
+            // For now we generate a per-process token; a future
+            // change can persist this in Settings if needed.
+            clientIdProvider = { CLIENT_ID_PER_PROCESS },
+        )
+    }
+
+    single<ConnectionEffectRunner> {
+        ConnectionEffectRunner(
+            activeServer = get(),
+            httpClientFactory = { server ->
+                get<ComfyHttpClient> { org.koin.core.parameter.parametersOf(server.baseUrl) }
+            },
+            webSocketSourceFactory = { server ->
+                get<WebSocketSource> { org.koin.core.parameter.parametersOf(server.baseUrl) }
+            },
+            scope = get(qualifier = APP_SCOPE),
+        )
+    }
+
+    /**
+     * The state machine is the lifecycle owner of the reducer +
+     * runner pair, exposing [ConnectionStateMachineFacade] to the UI
+     * so previews / tests can substitute a fake without depending on
+     * Ktor or the runner internals.
+     *
+     * Bound under both [ConnectionStateMachine] (concrete type, for
+     * platform code that needs `start`/`stop`) and
+     * [ConnectionStateMachineFacade] (interface, for UI / coordinator)
+     * so callers depend on the right shape.
+     */
+    single<ConnectionStateMachine> {
+        ConnectionStateMachine(
+            reducer = get(),
+            runner = get(),
+            scope = get(qualifier = APP_SCOPE),
+        )
+    }
+    single<ConnectionStateMachineFacade> { get<ConnectionStateMachine>() }
+
+    /**
+     * Translates platform monitor flows into state machine inputs.
+     * `start()` is idempotent; the App entry point calls it once on
+     * cold-start and `stop()` on terminate. Per @Lily PR #18 thread
+     * (`62385887`): no implicit `init { start() }` — explicit
+     * lifecycle handoff keeps "is this subscribed?" verifiable.
+     */
+    single<ConnectionStateMachineBootstrap> {
+        ConnectionStateMachineBootstrap(
+            machine = get(),
+            networkMonitor = get<NetworkMonitor>(),
+            lifecycleMonitor = get<LifecycleMonitor>(),
+            scope = get(qualifier = APP_SCOPE),
+        )
+    }
+
+    // ----------------------------------------------------------------- coordinators / view models
 
     factory<ConnectAttemptCoordinator> { (vm: com.comfymobile.presentation.connection.ConnectViewModel, vmScope: CoroutineScope) ->
         ConnectAttemptCoordinator(
@@ -155,3 +223,18 @@ fun appModule(): Module = module {
 
 internal val APP_SCOPE = named("app-scope")
 internal val SHARED_HTTP_CLIENT = named("shared-http-client")
+
+/**
+ * Stable per-process client id for ComfyUI's `/ws?clientId=...`
+ * handshake. Generated lazily on first read; survives the lifetime of
+ * the [appModule]'s [APP_SCOPE].
+ *
+ * ComfyUI does not require the value to be UUID-shaped — any stable
+ * non-empty string works — so a process-bound counter+millis token is
+ * sufficient and avoids a `kotlin.uuid` dependency. If a future
+ * change wants the id to survive process restarts, persist it in
+ * `Settings` and read it from there.
+ */
+private val CLIENT_ID_PER_PROCESS: String by lazy {
+    "comfymobile-" + nowEpochMs().toString(radix = 36)
+}

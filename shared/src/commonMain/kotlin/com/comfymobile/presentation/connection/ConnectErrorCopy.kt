@@ -75,6 +75,20 @@ object ConnectErrorCopy {
             suggestionZh = "换个端口（默认 8188）",
             suggestionEn = "Try another port (default 8188)",
         )
+        // Final copy from @Ores `b522a9f3` (PR #18 thread). CTA is
+        // intentionally NOT "Retry" — retrying without a server does
+        // nothing; pushing the user back to the connect form is the
+        // correct affordance.
+        ConnectError.NO_ACTIVE_SERVER -> Lookup(
+            titleZh = "没有选中的服务器",
+            titleEn = "No active server",
+            bodyZh = "还没有选好要连的服务器。从历史里挑一个，或在表单里输入 IP。",
+            bodyEn = "No server is selected. Pick one from history, or enter an IP again.",
+            suggestionZh = "选服务器或重新输入",
+            suggestionEn = "Pick a server or enter again",
+            primaryCtaZh = "去选择",
+            primaryCtaEn = "Choose",
+        )
         ConnectError.UNKNOWN -> Lookup(
             titleZh = "连接失败",
             titleEn = "Connection failed",
