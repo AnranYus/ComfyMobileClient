@@ -10,6 +10,7 @@ Mobile client for [ComfyUI](https://github.com/comfyanonymous/ComfyUI) — bring
 - Architecture decisions (`docs/decisions/`)
 - Architecture / integration docs (`docs/architecture/`)
 - UX / wireframes / control catalog (`docs/ux/`)
+- QA / acceptance checklist (`docs/qa/`)
 - Skeleton placeholders for the Phase 1 KMP module structure
 
 See [`BOOTSTRAP.md`](BOOTSTRAP.md) for what the first Phase 1 commit will add.
