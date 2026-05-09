@@ -5,6 +5,7 @@ import com.comfymobile.data.network.ComfyHttpException
 import com.comfymobile.domain.job.Job
 import com.comfymobile.domain.job.JobRepository
 import com.comfymobile.domain.job.JobStatus
+import kotlinx.coroutines.CancellationException
 
 /**
  * Settles in-flight rows in [JobRepository] against the server's
@@ -38,6 +39,7 @@ class JobReconciler(
         val checked: Int,
         val settledSucceeded: Int,
         val settledFailed: Int,
+        val settledInterrupted: Int,
         val stillRunning: Int,
         val skippedDueToHttpError: Int,
     )
@@ -51,17 +53,34 @@ class JobReconciler(
         val inflight = repository.listInFlight(serverId)
         var succeeded = 0
         var failed = 0
+        var interrupted = 0
         var stillRunning = 0
         var httpErrors = 0
         for (job in inflight) {
             when (val outcome = probeOne(job)) {
-                ProbeOutcome.Completed -> {
+                ProbeOutcome.Succeeded -> {
                     repository.updateStatus(
                         promptId = job.promptId,
                         status = JobStatus.SUCCEEDED,
                         finishedAtEpochMs = nowEpochMs(),
                     )
                     succeeded += 1
+                }
+                ProbeOutcome.Failed -> {
+                    repository.updateStatus(
+                        promptId = job.promptId,
+                        status = JobStatus.FAILED,
+                        finishedAtEpochMs = nowEpochMs(),
+                    )
+                    failed += 1
+                }
+                ProbeOutcome.Interrupted -> {
+                    repository.updateStatus(
+                        promptId = job.promptId,
+                        status = JobStatus.INTERRUPTED,
+                        finishedAtEpochMs = nowEpochMs(),
+                    )
+                    interrupted += 1
                 }
                 ProbeOutcome.NotFound -> {
                     // Server has no record of this prompt — most likely
@@ -83,19 +102,40 @@ class JobReconciler(
             checked = inflight.size,
             settledSucceeded = succeeded,
             settledFailed = failed,
+            settledInterrupted = interrupted,
             stillRunning = stillRunning,
             skippedDueToHttpError = httpErrors,
         )
     }
 
-    private suspend fun probeOne(job: Job): ProbeOutcome =
-        try {
+    private suspend fun probeOne(job: Job): ProbeOutcome {
+        return try {
             val entry = http.getHistoryEntry(job.promptId)
             when {
                 entry == null -> ProbeOutcome.NotFound
-                entry.status?.completed == true -> ProbeOutcome.Completed
-                else -> ProbeOutcome.Running
+                entry.status?.completed != true -> ProbeOutcome.Running
+                // completed = true, but we still need status_str to
+                // distinguish success / error / interrupted. ComfyUI
+                // sets status_str to "success", "error", or
+                // "interrupted" on completion — anything else
+                // (unknown server build) we conservatively classify
+                // as success because completed = true was the
+                // dominant signal. Per @Lily PR #9 review msg
+                // `7a630869`.
+                else -> when (entry.status.status_str) {
+                    "success" -> ProbeOutcome.Succeeded
+                    "error" -> ProbeOutcome.Failed
+                    "interrupted" -> ProbeOutcome.Interrupted
+                    null -> ProbeOutcome.Succeeded
+                    else -> ProbeOutcome.Succeeded
+                }
             }
+        } catch (ce: CancellationException) {
+            // Never swallow cancellation — that breaks structured
+            // concurrency. The reconciler is launched from the runner
+            // and the caller relies on cancellation propagating.
+            // (Per @Lily PR #9 review msg `7a630869`.)
+            throw ce
         } catch (httpEx: ComfyHttpException) {
             // Don't mutate state on transient HTTP errors — caller's
             // next reconcile pass will pick this up. We log nothing
@@ -105,9 +145,12 @@ class JobReconciler(
         } catch (t: Throwable) {
             ProbeOutcome.HttpError
         }
+    }
 
     private enum class ProbeOutcome {
-        Completed,
+        Succeeded,
+        Failed,
+        Interrupted,
         Running,
         NotFound,
         HttpError,

@@ -57,7 +57,7 @@ class JobReconcilerTest {
             createdAtEpochMs = 1000L,
         )
 
-    @Test fun reconcile_promotes_completed_inflight_to_SUCCEEDED() = runTest {
+    @Test fun reconcile_promotes_completed_success_inflight_to_SUCCEEDED() = runTest {
         val repo = InMemoryJobRepository()
         repo.upsert(queuedJob("p-1"))
         val client = http { _ ->
@@ -69,12 +69,46 @@ class JobReconcilerTest {
         assertEquals(1, summary.checked)
         assertEquals(1, summary.settledSucceeded)
         assertEquals(0, summary.settledFailed)
+        assertEquals(0, summary.settledInterrupted)
         assertEquals(0, summary.stillRunning)
         assertEquals(0, summary.skippedDueToHttpError)
 
         val updated = repo.getByPromptId("p-1")!!
         assertEquals(JobStatus.SUCCEEDED, updated.status)
         assertEquals(5000L, updated.finishedAtEpochMs)
+    }
+
+    @Test fun reconcile_promotes_completed_error_inflight_to_FAILED() = runTest {
+        // Per @Lily PR #9 review (msg `7a630869`): completed = true
+        // does NOT necessarily mean success — the server also sets
+        // completed = true on error / interrupted prompts and
+        // discriminates via status_str.
+        val repo = InMemoryJobRepository()
+        repo.upsert(queuedJob("p-err"))
+        val client = http { _ ->
+            HttpStatusCode.OK to """{"p-err":{"status":{"completed":true,"status_str":"error"}}}"""
+        }
+        val reconciler = JobReconciler(http = client, repository = repo, nowEpochMs = { 5000L })
+        val summary = reconciler.reconcileServer("srv-A")
+
+        assertEquals(0, summary.settledSucceeded)
+        assertEquals(1, summary.settledFailed)
+        assertEquals(JobStatus.FAILED, repo.getByPromptId("p-err")?.status)
+    }
+
+    @Test fun reconcile_promotes_completed_interrupted_inflight_to_INTERRUPTED() = runTest {
+        val repo = InMemoryJobRepository()
+        repo.upsert(queuedJob("p-int"))
+        val client = http { _ ->
+            HttpStatusCode.OK to """{"p-int":{"status":{"completed":true,"status_str":"interrupted"}}}"""
+        }
+        val reconciler = JobReconciler(http = client, repository = repo, nowEpochMs = { 5000L })
+        val summary = reconciler.reconcileServer("srv-A")
+
+        assertEquals(0, summary.settledSucceeded)
+        assertEquals(0, summary.settledFailed)
+        assertEquals(1, summary.settledInterrupted)
+        assertEquals(JobStatus.INTERRUPTED, repo.getByPromptId("p-int")?.status)
     }
 
     @Test fun reconcile_keeps_RUNNING_for_inflight_when_server_says_not_completed() = runTest {
@@ -197,6 +231,16 @@ class JobReconcilerTest {
         val client = http { _ -> HttpStatusCode.OK to """{}""" }
         val reconciler = JobReconciler(http = client, repository = repo, nowEpochMs = { 5000L })
         val summary = reconciler.reconcileServer("srv-A")
-        assertEquals(JobReconciler.Summary(0, 0, 0, 0, 0), summary)
+        assertEquals(
+            JobReconciler.Summary(
+                checked = 0,
+                settledSucceeded = 0,
+                settledFailed = 0,
+                settledInterrupted = 0,
+                stillRunning = 0,
+                skippedDueToHttpError = 0,
+            ),
+            summary,
+        )
     }
 }

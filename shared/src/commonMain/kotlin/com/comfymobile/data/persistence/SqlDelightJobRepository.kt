@@ -35,21 +35,20 @@ class SqlDelightJobRepository(
     private val queries get() = db.jobQueries
 
     override suspend fun upsert(job: Job) = withContext(ioDispatcher) {
-        // SQLDelight has no INSERT OR REPLACE statement compiled in;
-        // emulate via DELETE + INSERT in a transaction so concurrent
-        // observers see one consistent commit.
-        db.transaction {
-            queries.insertJob(
-                prompt_id = job.promptId,
-                server_id = job.serverId,
-                status = job.status.wireValue,
-                workflow_snapshot_json = job.workflowSnapshotJson,
-                api_prompt_json = job.apiPromptJson,
-                label = job.label,
-                created_at = job.createdAtEpochMs,
-                finished_at = job.finishedAtEpochMs,
-            )
-        }
+        // The .sq file declares this as `INSERT OR REPLACE`, so a
+        // duplicate prompt_id (e.g. resubmitted after a transient WS
+        // drop) doesn't collide on the PRIMARY KEY. (Per @Lily PR #9
+        // review msg `7a630869`.)
+        queries.upsertJob(
+            prompt_id = job.promptId,
+            server_id = job.serverId,
+            status = job.status.wireValue,
+            workflow_snapshot_json = job.workflowSnapshotJson,
+            api_prompt_json = job.apiPromptJson,
+            label = job.label,
+            created_at = job.createdAtEpochMs,
+            finished_at = job.finishedAtEpochMs,
+        )
     }
 
     override suspend fun updateStatus(

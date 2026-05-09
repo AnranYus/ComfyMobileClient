@@ -54,8 +54,13 @@ CREATE INDEX jobIndex_byServer_byCreated
 
 -- ----- queries -----
 
-insertJob:
-INSERT INTO jobIndex(
+-- Used for the JobRepository.upsert() entry point. SQLite's
+-- `INSERT OR REPLACE` deletes any existing row with the same
+-- primary key and inserts the new one in a single statement, so
+-- repeated submission attempts (e.g. retry after WS drop) don't
+-- collide on the PRIMARY KEY constraint.
+upsertJob:
+INSERT OR REPLACE INTO jobIndex(
     prompt_id, server_id, status,
     workflow_snapshot_json, api_prompt_json,
     label, created_at, finished_at
