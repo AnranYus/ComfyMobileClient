@@ -22,3 +22,11 @@ expect fun createSqlDriver(context: PlatformContext): SqlDriver
  * `NSUserDefaultsSettings`.
  */
 expect fun createSettings(context: PlatformContext): Settings
+
+/**
+ * Current wall-clock time in Unix milliseconds. Wraps the platform
+ * clock (Android: `System.currentTimeMillis()`; iOS:
+ * `NSDate.timeIntervalSince1970`) so commonMain code can stamp
+ * timestamps without taking a kotlinx-datetime dependency.
+ */
+expect fun nowEpochMs(): Long
