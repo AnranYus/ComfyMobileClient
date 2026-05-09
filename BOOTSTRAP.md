@@ -1,36 +1,49 @@
-# Bootstrap — first Phase 1 commit
+# Bootstrap
 
-This file lists what's needed to make the repo **runnable** for the first time. Phase 0 closed with this skeleton + design docs; Phase 1 starts by filling in the Gradle build.
+Phase 1.0 (T1.0) lands the KMP project skeleton + Compose Multiplatform Hello screen + Android APK build path. This document captures what's done and what comes next.
 
-## What to add (Phase 1.0 task)
+## What this commit adds
 
-1. **Gradle wrapper** — generate via `gradle wrapper --gradle-version 8.x` (locally, with a Gradle 8.x install on PATH).
-2. **Top-level build files**:
-   - `settings.gradle.kts` — declares `:shared`, `:androidApp` (and `:iosApp` if used as Gradle module).
-   - `build.gradle.kts` — root configuration.
-   - `gradle/libs.versions.toml` — version catalog (skeleton in `docs/architecture/T0.2-kmp-skeleton-and-rendering.md` §M1).
-3. **`shared/` module**:
-   - `shared/build.gradle.kts` declaring `kotlin { androidTarget(); iosX64(); iosArm64(); iosSimulatorArm64() }`.
-   - Stub `commonMain/kotlin/com/comfymobile/Hello.kt` returning a string.
-4. **`androidApp/` module**:
-   - `androidApp/build.gradle.kts` with Compose plugin.
-   - `androidApp/src/main/AndroidManifest.xml` with single `MainActivity`.
-   - `androidApp/src/main/kotlin/com/comfymobile/android/MainActivity.kt` calling Compose root.
-5. **`iosApp/`**:
-   - Either a Compose Multiplatform `iosApp.xcodeproj` (generated via Xcode + KMP plugin), or a SwiftUI shim that consumes `:shared:framework`.
-   - This step requires running on macOS to produce the `xcodeproj`; can be done by any team member with macOS in CI.
-6. **CI smoke** — see `.github/workflows/ci.yml` placeholder.
+- ✅ Gradle wrapper (Gradle 8.10.2)
+- ✅ `settings.gradle.kts` declaring `:shared` and `:androidApp`
+- ✅ `gradle/libs.versions.toml` version catalog (Kotlin 2.0.21 / Compose Multiplatform 1.7.0 / AGP 8.7.3 / Ktor 3 / SQLDelight 2 / Coil 3 / Koin 4 / kotlinx-serialization)
+- ✅ `:shared` KMP module with Android + iOS targets, common Compose UI (`App.kt`), iOS entry point (`MainViewController.kt`)
+- ✅ `:androidApp` thin Android wrapper (`MainActivity` calls into `:shared:App()`)
+- ✅ GitHub Actions CI: docs-and-structure, Android `assembleDebug` + APK artifact upload, iOS targets compile smoke
+- ✅ `Greeting.kt` returns `ComfyMobileClient v0.0.1` for the Hello screen
 
-## Recommended: regenerate from JetBrains KMP Wizard
+## Local build (Android)
 
-The simplest path is to run the [Kotlin Multiplatform Wizard](https://kmp.jetbrains.com/) with:
-- Targets: Android, iOS
-- UI: Compose Multiplatform (shared UI)
-- Module name: `shared`
-- Application id: `com.comfymobile`
+Requires Android SDK + JDK 17.
 
-…then merge the generated structure into this repo, preserving `docs/`, `README.md`, `.gitignore`, and `.github/`.
+```bash
+# From repo root:
+./gradlew :androidApp:assembleDebug
+# APK will be in androidApp/build/outputs/apk/debug/
+```
 
-## Why not include a generated KMP wizard output now?
+The Android SDK location is read from `local.properties` (preferred) or `ANDROID_HOME` env var.
 
-The ComfyMobileClient repo was created fresh per @nothing's preference (the prior `ComfyMobile` repo had a wizard template but was set aside to "新起项目"). Generating the wizard requires interactive web flow + macOS for the xcodeproj. Phase 0 closes by capturing **what** to scaffold; Phase 1.0 will do the actual scaffolding and verify builds.
+## CI-built APK
+
+Every push to `main` and every PR runs `android-build` which uploads the debug APK as a workflow artifact. To grab a build:
+
+1. Open the Actions tab → pick the latest run
+2. Scroll to "Artifacts" → download `comfymobileclient-debug-apk`
+3. Sideload to a real device (`adb install` or transfer to phone storage)
+
+## What's NOT in this commit
+
+These land in subsequent Phase 1 tasks:
+
+- **iOS `iosApp.xcodeproj` + IPA** → T1.0b. Generated on a macOS GH Actions runner; PR'd back to `main`. Until then iOS targets compile but there's no app shell to launch on a simulator/device.
+- **ComfyUI HTTP/WS client** → T1.1 (`shared/.../data/network/`)
+- **Workflow data model + UI↔API conversion + PNG roundtrip** → T1.2 (`shared/.../domain/workflow/`)
+- **Local job index + ghost-state recovery + Coil cache** → T1.3 (`shared/.../data/persistence/`)
+- **Manual-IP connection UI** → T1.4 (`shared/.../presentation/connection/`)
+- **Node descriptor v1 config + loader** → T1.5 (`shared/.../composeResources/files/node-descriptors/v1.json` + `data/descriptor/`)
+- **QA harness** (UI↔API conversion unit tests, PNG roundtrip fixture, B/C ghost-state regression) → T1.6
+
+## Versioning
+
+`androidApp` `versionCode = 1`, `versionName = "0.0.1"` — bumped by future Phase 1 releases as features land.
