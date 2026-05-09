@@ -17,6 +17,8 @@ captures/
 # Xcode
 xcuserdata/
 *.xcworkspace/
+!iosApp/iosApp.xcworkspace/
+!iosApp/iosApp.xcworkspace/**
 DerivedData/
 *.xcuserstate
 project.xcworkspace
