@@ -190,4 +190,36 @@ class ConnectionStateMachineTest {
         machine.untrackInFlight("p-1")
         assertEquals(setOf("p-2"), runner.snapshotInFlight())
     }
+
+    @Test fun dispatch_before_start_is_buffered_and_processed_after_start() = runTest {
+        // Regression for @Lily PR #12 review (msg `335b8813`):
+        // externalInputs must NOT drop early dispatches. Even if a
+        // UI handler / platform broadcast fires before the observer
+        // coroutine begins collecting, the input has to be processed.
+        // Backed by an UNLIMITED Channel; tryEmit-on-SharedFlow would
+        // have silently dropped this.
+        val (machine, _, _) = buildMachine(this)
+        // Dispatch BEFORE start. With Channel buffering this must be
+        // queued; with the previous MutableSharedFlow it was lost.
+        machine.dispatch(ConnectionInput.Ws(droppedReason = WsDropReason.LAN_FLAKE))
+        machine.start()
+        advanceUntilIdle()
+        assertIs<ConnectionState.Reconnecting>(machine.currentState.value)
+        machine.stop()
+    }
+
+    @Test fun multiple_dispatches_before_start_are_all_processed_in_order() = runTest {
+        val (machine, _, _) = buildMachine(this)
+        // Burst of three dispatches before the observer starts.
+        machine.dispatch(ConnectionInput.Ws(droppedReason = WsDropReason.LAN_FLAKE))
+        machine.dispatch(ConnectionInput.Retry)             // re-issues OpenWs
+        machine.dispatch(ConnectionInput.ConnectAttempt(classified = ConnectError.NOT_COMFYUI))
+        machine.start()
+        advanceUntilIdle()
+        // Final state should be Lost(NOT_COMFYUI) — the last dispatch
+        // wins after the reducer chains through all three.
+        val lost = assertIs<ConnectionState.Lost>(machine.currentState.value)
+        assertEquals(ConnectError.NOT_COMFYUI, lost.error)
+        machine.stop()
+    }
 }

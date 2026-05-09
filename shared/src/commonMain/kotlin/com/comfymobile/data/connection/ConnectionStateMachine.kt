@@ -8,12 +8,13 @@ import com.comfymobile.data.network.ConnectionStateReducer
 import com.comfymobile.data.network.SideEffectIntent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -56,10 +57,22 @@ class ConnectionStateMachine(
     /** Authoritative connection state. */
     val currentState: StateFlow<ConnectionState> = _state.asStateFlow()
 
-    /** Direct external inputs (UI Retry button, NetworkMonitor /
+    /**
+     * Direct external inputs (UI Retry button, NetworkMonitor /
      *  LifecycleMonitor adapters, etc.). Internal so callers go
-     *  through [dispatch]. */
-    private val externalInputs = MutableSharedFlow<ConnectionInput>(extraBufferCapacity = 64)
+     *  through [dispatch].
+     *
+     *  Backed by an UNLIMITED [Channel] (NOT a `MutableSharedFlow` /
+     *  `tryEmit`) — `MutableSharedFlow(replay=0)` drops emissions
+     *  while there are zero subscribers, which means a `dispatch()`
+     *  arriving before the observer coroutine has actually started
+     *  collecting would silently disappear. Buffering through a
+     *  Channel means an early `dispatch()` (e.g. a quick UI Retry
+     *  while `start()` is still launching) is enqueued and consumed
+     *  the moment the collector activates. (Per @Lily PR #12 review,
+     *  msg `335b8813`.)
+     */
+    private val externalInputs = Channel<ConnectionInput>(Channel.UNLIMITED)
 
     /**
      * Errors emitted by the runner — re-exposed here so a single
@@ -77,7 +90,7 @@ class ConnectionStateMachine(
     fun start() {
         if (observerJob?.isActive == true) return
         observerJob = scope.launch {
-            merge(runner.producedInputs, externalInputs).collect { input ->
+            merge(runner.producedInputs, externalInputs.receiveAsFlow()).collect { input ->
                 processInput(input)
             }
         }
@@ -92,11 +105,12 @@ class ConnectionStateMachine(
 
     /**
      * Dispatch an external input from the UI / platform monitors.
-     * Buffered (UNLIMITED-ish) so callers don't suspend; the observer
-     * coroutine drains.
+     * The Channel is UNLIMITED so this never suspends and never
+     * drops; safe to call from a Compose `onClick` handler or a
+     * platform broadcast receiver.
      */
     fun dispatch(input: ConnectionInput) {
-        externalInputs.tryEmit(input)
+        externalInputs.trySend(input)
     }
 
     /**
