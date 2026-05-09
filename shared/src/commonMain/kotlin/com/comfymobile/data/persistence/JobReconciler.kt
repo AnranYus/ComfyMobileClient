@@ -16,17 +16,25 @@ import kotlinx.coroutines.CancellationException
  * Pure data flow:
  *   1. Read all in-flight rows for the active server.
  *   2. For each, ask `/history/{prompt_id}`:
- *      - 200 with `status.completed = true` → SUCCEEDED
+ *      - 200 with `status.completed = true`  → discriminate via
+ *        `status.status_str`:
+ *           "success"     → SUCCEEDED
+ *           "error"       → FAILED
+ *           "interrupted" → INTERRUPTED
+ *           null / unknown server-build value → SUCCEEDED
+ *           (conservative default)
  *      - 200 with completed = false / null   → still RUNNING
  *      - 404 (or null body)                  → server forgot the
  *        prompt; we map to FAILED with the timestamp now (caller
  *        provides a clock)
  *      - HTTP 5xx / network error            → leave the row alone;
- *        next reconnect will retry
+ *        next reconcile pass will retry
+ *      - CancellationException               → propagate (never
+ *        swallowed — structured concurrency)
  *   3. Update repository rows whose terminal state changed.
  *
- * Returns a [Result] summary so the caller (T1.4 ViewModel) can
- * surface "X jobs settled" telemetry / banner if desired.
+ * Returns a [Summary] so the caller (T1.4 ViewModel) can surface
+ * "X jobs settled" telemetry / banner if desired.
  */
 class JobReconciler(
     private val http: ComfyHttpClient,

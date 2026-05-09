@@ -13,11 +13,13 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.utils.io.ByteReadChannel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 
 /**
  * Drives [JobReconciler] against [InMemoryJobRepository] + a Ktor
@@ -224,6 +226,33 @@ class JobReconcilerTest {
         assertEquals(0, summary.checked)
         // finished_at preserved (not overwritten by the now-clock).
         assertEquals(100L, repo.getByPromptId("p-old")?.finishedAtEpochMs)
+    }
+
+    @Test fun reconcile_propagates_CancellationException_without_swallowing() = runTest {
+        // Regression: probeOne must not turn CancellationException
+        // into HttpError. If a future refactor reorders or removes
+        // the explicit `catch (ce: CancellationException) { throw ce }`,
+        // structured concurrency breaks silently — this test pins
+        // the behaviour. (Per @Lily PR #9 review msg `cf22e688`.)
+        val repo = InMemoryJobRepository()
+        repo.upsert(queuedJob("p-1"))
+        val client = ComfyHttpClient(
+            baseUrl = baseUrl,
+            client = HttpClient(MockEngine { _ ->
+                throw CancellationException("test cancel")
+            }) {
+                install(ContentNegotiation) {
+                    json(Json { ignoreUnknownKeys = true })
+                }
+            },
+        )
+        val reconciler = JobReconciler(http = client, repository = repo, nowEpochMs = { 5000L })
+        assertFailsWith<CancellationException> {
+            reconciler.reconcileServer("srv-A")
+        }
+        // Repository state untouched — the cancellation interrupted
+        // the reconcile before any updateStatus could land.
+        assertEquals(JobStatus.QUEUED, repo.getByPromptId("p-1")?.status)
     }
 
     @Test fun reconcile_with_empty_inflight_returns_zero_summary() = runTest {
