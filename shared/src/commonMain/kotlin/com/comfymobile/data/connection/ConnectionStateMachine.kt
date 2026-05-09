@@ -20,6 +20,29 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
+ * UI-facing surface of the connection layer. The Compose UI in
+ * `presentation/connection/` consumes a [ConnectionStateMachineFacade]
+ * — never the concrete [ConnectionStateMachine] — so:
+ *  1. Compose previews / unit tests can substitute a fake (e.g.
+ *     `FakeConnectionStateMachine` in T1.4b part 2 tests) without
+ *     depending on Ktor / coroutines / runner internals.
+ *  2. The lifecycle methods (`start`, `stop`) and the in-flight
+ *     bookkeeping (`trackInFlight`, etc.) stay scoped to the
+ *     ViewModel that owns the lifecycle; UI can't accidentally
+ *     mis-use them.
+ *
+ * Production binding: [ConnectionStateMachine] implements this
+ * facade. The DI module (T1.4b part 3) provides the same instance
+ * under both types — typing UI dependencies as the facade keeps the
+ * compile boundary clean.
+ */
+interface ConnectionStateMachineFacade {
+    val currentState: StateFlow<ConnectionState>
+    val errors: Flow<ConnectError>
+    fun dispatch(input: ConnectionInput)
+}
+
+/**
  * High-level driver that ties [ConnectionStateReducer] and
  * [ConnectionEffectRunner] together so the rest of the app sees a
  * single object to observe and dispatch into.
@@ -50,12 +73,12 @@ class ConnectionStateMachine(
     private val runner: ConnectionEffectRunner,
     private val scope: CoroutineScope,
     initialState: ConnectionState = ConnectionState.Connected,
-) {
+) : ConnectionStateMachineFacade {
 
     private val mutex = Mutex()
     private val _state = MutableStateFlow(initialState)
     /** Authoritative connection state. */
-    val currentState: StateFlow<ConnectionState> = _state.asStateFlow()
+    override val currentState: StateFlow<ConnectionState> = _state.asStateFlow()
 
     /**
      * Direct external inputs (UI Retry button, NetworkMonitor /
@@ -78,7 +101,7 @@ class ConnectionStateMachine(
      * Errors emitted by the runner — re-exposed here so a single
      * Compose ViewModel can subscribe to one type per machine.
      */
-    val errors: Flow<ConnectError> get() = runner.emittedErrors
+    override val errors: Flow<ConnectError> get() = runner.emittedErrors
 
     private var observerJob: Job? = null
 
@@ -109,7 +132,7 @@ class ConnectionStateMachine(
      * drops; safe to call from a Compose `onClick` handler or a
      * platform broadcast receiver.
      */
-    fun dispatch(input: ConnectionInput) {
+    override fun dispatch(input: ConnectionInput) {
         externalInputs.trySend(input)
     }
 
