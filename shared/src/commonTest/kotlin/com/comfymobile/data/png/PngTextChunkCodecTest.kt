@@ -1,0 +1,281 @@
+package com.comfymobile.data.png
+
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+/**
+ * Unit tests for [PngTextChunkCodec] + [PngCrc32].
+ *
+ * Per @Lily PR #7 review (msg `7bd63c37`), focus areas:
+ *  - chunk length/type/data/CRC boundary validation
+ *  - tEXt keyword/text encoding limits
+ *  - insertion position stable before IEND, doesn't break existing
+ *    chunks
+ *
+ * The "this MUST be the edited UI snapshot, not the original" contract
+ * is encoded in [ComfyPngWorkflow]'s KDoc and verified by the
+ * round-trip behaviour: embed(X) followed by extract returns X. The
+ * caller's responsibility to pass the *current* snapshot lives one
+ * layer up (T1.4 connection UI shell).
+ */
+class PngTextChunkCodecTest {
+
+    @Test fun signature_mismatch_throws_PngFormatException() {
+        val notPng = byteArrayOf(0, 1, 2, 3, 4, 5, 6, 7, 8, 9)
+        val ex = assertFailsWith<PngFormatException> {
+            PngTextChunkCodec.extract(notPng, "workflow")
+        }
+        assertTrue("signature" in ex.message.orEmpty())
+    }
+
+    @Test fun too_short_for_signature_throws_PngFormatException() {
+        val ex = assertFailsWith<PngFormatException> {
+            PngTextChunkCodec.extract(byteArrayOf(0x89.toByte(), 0x50, 0x4E), "workflow")
+        }
+        assertTrue("PNG" in ex.message.orEmpty())
+    }
+
+    @Test fun extract_on_minimal_png_with_no_text_chunks_returns_null() {
+        val png = buildMinimalPng()
+        assertNull(PngTextChunkCodec.extract(png, "workflow"))
+    }
+
+    @Test fun list_on_minimal_png_returns_empty_map() {
+        val png = buildMinimalPng()
+        assertTrue(PngTextChunkCodec.list(png).isEmpty())
+    }
+
+    @Test fun embed_then_extract_round_trips_text_value() {
+        val png = buildMinimalPng()
+        val embedded = PngTextChunkCodec.embed(png, "workflow", """{"version":1}""")
+        val extracted = PngTextChunkCodec.extract(embedded, "workflow")
+        assertEquals("""{"version":1}""", extracted)
+    }
+
+    @Test fun embed_inserts_text_chunk_immediately_before_IEND() {
+        val png = buildMinimalPng()
+        val embedded = PngTextChunkCodec.embed(png, "workflow", "hello")
+        // Original PNG has signature + IHDR + IDAT + IEND. After embed
+        // we expect signature + IHDR + IDAT + tEXt + IEND.
+        // We verify by listing chunk types in order via a re-scan.
+        val chunkTypes = walkChunkTypes(embedded)
+        assertEquals(listOf("IHDR", "IDAT", "tEXt", "IEND"), chunkTypes)
+    }
+
+    @Test fun embed_preserves_other_chunks_with_intact_CRC() {
+        val png = buildMinimalPng()
+        val embedded = PngTextChunkCodec.embed(png, "workflow", "hello")
+        // If any existing chunk's CRC was disturbed, scan would throw.
+        // Re-extracting also exercises the CRC verification on every
+        // chunk we re-emitted.
+        assertEquals("hello", PngTextChunkCodec.extract(embedded, "workflow"))
+    }
+
+    @Test fun embed_replaces_existing_chunk_with_same_keyword() {
+        var png = buildMinimalPng()
+        png = PngTextChunkCodec.embed(png, "workflow", "first")
+        png = PngTextChunkCodec.embed(png, "workflow", "second")
+        // Only one tEXt chunk should exist (second one).
+        val chunkTypes = walkChunkTypes(png)
+        assertEquals(1, chunkTypes.count { it == "tEXt" })
+        assertEquals("second", PngTextChunkCodec.extract(png, "workflow"))
+    }
+
+    @Test fun embed_with_different_keyword_keeps_both_chunks() {
+        var png = buildMinimalPng()
+        png = PngTextChunkCodec.embed(png, "workflow", "ui-side")
+        png = PngTextChunkCodec.embed(png, "prompt", "api-side")
+        val chunkTypes = walkChunkTypes(png)
+        assertEquals(2, chunkTypes.count { it == "tEXt" })
+        assertEquals("ui-side", PngTextChunkCodec.extract(png, "workflow"))
+        assertEquals("api-side", PngTextChunkCodec.extract(png, "prompt"))
+    }
+
+    @Test fun list_returns_all_text_chunks_in_order() {
+        var png = buildMinimalPng()
+        png = PngTextChunkCodec.embed(png, "workflow", "ui-side")
+        png = PngTextChunkCodec.embed(png, "prompt", "api-side")
+        val all = PngTextChunkCodec.list(png)
+        assertEquals(setOf("workflow", "prompt"), all.keys)
+        assertEquals("ui-side", all["workflow"])
+        assertEquals("api-side", all["prompt"])
+    }
+
+    @Test fun embed_rejects_empty_keyword() {
+        val png = buildMinimalPng()
+        assertFailsWith<IllegalArgumentException> {
+            PngTextChunkCodec.embed(png, "", "x")
+        }
+    }
+
+    @Test fun embed_rejects_keyword_longer_than_79_bytes() {
+        val png = buildMinimalPng()
+        val longKeyword = "k".repeat(80)
+        assertFailsWith<IllegalArgumentException> {
+            PngTextChunkCodec.embed(png, longKeyword, "x")
+        }
+    }
+
+    @Test fun embed_accepts_keyword_at_max_79_bytes() {
+        val png = buildMinimalPng()
+        val maxKeyword = "k".repeat(79)
+        val embedded = PngTextChunkCodec.embed(png, maxKeyword, "x")
+        assertEquals("x", PngTextChunkCodec.extract(embedded, maxKeyword))
+    }
+
+    @Test fun embed_rejects_keyword_containing_null_byte() {
+        val png = buildMinimalPng()
+        // Null byte within an otherwise short keyword.
+        assertFailsWith<IllegalArgumentException> {
+            PngTextChunkCodec.embed(png, ("bad" + "\u0000" + "kw"), "x")
+        }
+    }
+
+    @Test fun corrupted_chunk_crc_is_detected_during_scan() {
+        val png = buildMinimalPng()
+        // Flip a bit in the IHDR data area (offset 8 + 4 + 4 = 16 = first IHDR data byte).
+        val corrupted = png.copyOf()
+        corrupted[16] = (corrupted[16].toInt() xor 1).toByte()
+        val ex = assertFailsWith<PngFormatException> {
+            PngTextChunkCodec.extract(corrupted, "workflow")
+        }
+        assertTrue("CRC" in ex.message.orEmpty(), "expected CRC in error, got: ${ex.message}")
+    }
+
+    @Test fun truncated_chunk_throws_PngFormatException() {
+        val png = buildMinimalPng()
+        // Truncate before the last chunk's CRC.
+        val truncated = png.copyOf(png.size - 4)
+        assertFailsWith<PngFormatException> {
+            PngTextChunkCodec.extract(truncated, "workflow")
+        }
+    }
+
+    @Test fun png_without_IEND_throws_on_extract() {
+        // Build a PNG that's syntactically chunk-walkable but has no
+        // IEND. Without the explicit IEND check, extract() would have
+        // silently returned null. (Per @Lily PR #8 review msg
+        // `ee8e36e3`: "无 IEND 是无效 PNG，应抛 PngFormatException".)
+        val signature = byteArrayOf(
+            0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+        )
+        val ihdr = encodeChunk(
+            type = "IHDR".encodeToByteArray(),
+            data = byteArrayOf(0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0),
+        )
+        val idat = encodeChunk("IDAT".encodeToByteArray(), byteArrayOf(0))
+        // signature + IHDR + IDAT, NO IEND.
+        val out = ByteArray(signature.size + ihdr.size + idat.size)
+        var off = 0
+        signature.copyInto(out, off); off += signature.size
+        ihdr.copyInto(out, off); off += ihdr.size
+        idat.copyInto(out, off)
+
+        val ex = assertFailsWith<PngFormatException> {
+            PngTextChunkCodec.extract(out, "workflow")
+        }
+        assertTrue("IEND" in ex.message.orEmpty(), "expected IEND in error, got: ${ex.message}")
+    }
+
+    @Test fun png_without_IEND_throws_on_list() {
+        val signature = byteArrayOf(
+            0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+        )
+        val ihdr = encodeChunk(
+            type = "IHDR".encodeToByteArray(),
+            data = byteArrayOf(0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0),
+        )
+        val out = ByteArray(signature.size + ihdr.size)
+        signature.copyInto(out, 0)
+        ihdr.copyInto(out, signature.size)
+        assertFailsWith<PngFormatException> {
+            PngTextChunkCodec.list(out)
+        }
+    }
+
+    @Test fun text_with_unicode_round_trips_via_utf8_encoding() {
+        // Note: PNG `tEXt` officially permits Latin-1, but ComfyUI in
+        // practice writes UTF-8 (the JSON they embed contains string
+        // payloads from any locale). kotlinx-serialization handles
+        // UTF-8 via encodeToByteArray()/decodeToString() consistently.
+        val png = buildMinimalPng()
+        val text = """{"label":"我的工作流"}"""
+        val embedded = PngTextChunkCodec.embed(png, "workflow", text)
+        assertEquals(text, PngTextChunkCodec.extract(embedded, "workflow"))
+    }
+
+    // ---------------------------------------------------------------- helpers
+
+    /**
+     * Build a minimal but syntactically valid PNG: signature + IHDR
+     * (1×1 grayscale) + IDAT (one trivial deflate-style block) + IEND.
+     * Real PNG decoders may or may not render this, but the chunk
+     * walker only cares about syntax, so this is sufficient for codec
+     * tests.
+     */
+    private fun buildMinimalPng(): ByteArray {
+        val signature = byteArrayOf(
+            0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+        )
+        val ihdr = encodeChunk(
+            type = "IHDR".encodeToByteArray(),
+            data = byteArrayOf(
+                // width = 1
+                0, 0, 0, 1,
+                // height = 1
+                0, 0, 0, 1,
+                // bit depth, color type, compression, filter, interlace
+                1, 0, 0, 0, 0,
+            ),
+        )
+        // Trivial IDAT — content doesn't matter for codec tests.
+        val idat = encodeChunk("IDAT".encodeToByteArray(), byteArrayOf(0))
+        val iend = encodeChunk("IEND".encodeToByteArray(), byteArrayOf())
+        val out = ByteArray(signature.size + ihdr.size + idat.size + iend.size)
+        var off = 0
+        signature.copyInto(out, off); off += signature.size
+        ihdr.copyInto(out, off); off += ihdr.size
+        idat.copyInto(out, off); off += idat.size
+        iend.copyInto(out, off)
+        return out
+    }
+
+    private fun encodeChunk(type: ByteArray, data: ByteArray): ByteArray {
+        require(type.size == 4)
+        val out = ByteArray(4 + 4 + data.size + 4)
+        // length (big-endian uint32)
+        val len = data.size
+        out[0] = (len ushr 24).toByte()
+        out[1] = (len ushr 16).toByte()
+        out[2] = (len ushr 8).toByte()
+        out[3] = len.toByte()
+        type.copyInto(out, destinationOffset = 4)
+        data.copyInto(out, destinationOffset = 8)
+        val crc = PngCrc32.compute(typeBytes = type, dataBytes = data)
+        val cOff = 8 + data.size
+        out[cOff] = (crc ushr 24).toByte()
+        out[cOff + 1] = (crc ushr 16).toByte()
+        out[cOff + 2] = (crc ushr 8).toByte()
+        out[cOff + 3] = crc.toByte()
+        return out
+    }
+
+    private fun walkChunkTypes(png: ByteArray): List<String> {
+        val out = mutableListOf<String>()
+        var i = 8 // skip signature
+        while (i < png.size) {
+            val length = ((png[i].toInt() and 0xFF) shl 24) or
+                ((png[i + 1].toInt() and 0xFF) shl 16) or
+                ((png[i + 2].toInt() and 0xFF) shl 8) or
+                (png[i + 3].toInt() and 0xFF)
+            val type = png.copyOfRange(i + 4, i + 8).decodeToString()
+            out.add(type)
+            i = i + 8 + length + 4
+        }
+        return out
+    }
+}
