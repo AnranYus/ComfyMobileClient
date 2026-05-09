@@ -12,40 +12,38 @@ import com.comfymobile.domain.server.ServerInfo
 import com.comfymobile.presentation.connection.ConnectUiEvent
 import com.comfymobile.presentation.connection.ConnectViewModel
 import com.comfymobile.presentation.connection.ServerFormSubmit
-import io.ktor.client.HttpClient
-import io.ktor.client.HttpClientConfig
-import io.ktor.client.engine.HttpClientEngine
-import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
-import io.ktor.client.plugins.websocket.WebSockets
-import io.ktor.serialization.kotlinx.json.json
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
-import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
 
 /**
  * Drives the "user submitted a host:port" → "machine sees the right
  * outcome" loop.
  *
- * Subscribes to [ConnectViewModel.events] and, for each
- * [ConnectUiEvent.ConnectRequested], runs a `/system_stats` probe
- * against the requested server. The probe outcome is translated into
- * a [ConnectionInput] (success path: Retry to keep the machine in
- * Connected state; failure path: ConnectAttempt(classifiedError) so
- * the state machine surfaces the error to the UI). Successful probes
- * upsert the server entry into [ServerHistoryStore] so the friendly
- * label and `lastConnectedAtEpochMs` reflect the latest attempt.
+ * Subscribes to [ConnectViewModel.events]:
+ *  - [ConnectUiEvent.ConnectRequested]: run a `/system_stats` probe;
+ *    on success record the server in [ServerHistoryStore], promote
+ *    it in [ActiveServerHolder], and dispatch
+ *    [ConnectionInput.Retry] to nudge the state machine out of any
+ *    prior `Lost` state. On failure, classify via
+ *    [ConnectErrorClassifier] and dispatch
+ *    [ConnectionInput.ConnectAttempt] so the state machine surfaces
+ *    the error to the UI.
+ *  - [ConnectUiEvent.RenameRequested]: upsert the renamed server.
  *
- * Per @Lily PR #16 + #17 reviews: server history is **only** updated
- * on probe success — we never write a row before we've actually
- * verified the LAN endpoint speaks ComfyUI.
+ * Per @Lily reviews: server history is **only** updated on probe
+ * success; the active server pointer is **only** set on probe
+ * success; CancellationException always propagates so structured
+ * concurrency works (the coordinator is launched from the VM scope
+ * and that scope's cancellation must reach the probe coroutines).
  */
 class ConnectAttemptCoordinator(
     private val viewModel: ConnectViewModel,
     private val historyStore: ServerHistoryStore,
     private val machine: ConnectionStateMachineFacade,
+    private val activeServer: ActiveServerHolder,
     private val scope: CoroutineScope,
     private val nowEpochMs: () -> Long,
     /**
@@ -80,8 +78,9 @@ class ConnectAttemptCoordinator(
         val baseUrl = "http://${submit.host}:${submit.port}"
         val client = httpClientFor(baseUrl)
         try {
-            val stats = client.getSystemStats()
-            // Probe succeeded → record / refresh server entry.
+            client.getSystemStats()
+            // Probe succeeded → record / refresh server entry, mark
+            // it active, nudge the state machine out of Lost.
             val server = ServerInfo(
                 serverId = ServerInfo.idFor(submit.host, submit.port),
                 host = submit.host,
@@ -90,7 +89,16 @@ class ConnectAttemptCoordinator(
                 lastConnectedAtEpochMs = nowEpochMs(),
             )
             historyStore.upsert(server)
-            // Stay in Connected (no input needed; reducer keeps state).
+            activeServer.setActive(server)
+            // Retry is a no-op while Connected; transitions Lost
+            // back to Reconnecting (the runner / bootstrap then
+            // takes over).
+            machine.dispatch(ConnectionInput.Retry)
+        } catch (ce: CancellationException) {
+            // Never swallow cancellation — the VM scope cancelling
+            // the coordinator must propagate. Per the same pattern
+            // as JobReconciler.probeOne (T1.3 part 1).
+            throw ce
         } catch (httpEx: ComfyHttpException) {
             val outcome = httpEx.toAttemptOutcome()
             val (error, _) = ConnectErrorClassifier.classify(outcome)

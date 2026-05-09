@@ -62,9 +62,10 @@ class ConnectAttemptCoordinatorTest {
         return ComfyHttpClient("http://stub", mock)
     }
 
-    @Test fun successful_probe_upserts_server_to_history() = runTest {
+    @Test fun successful_probe_upserts_server_sets_active_dispatches_Retry() = runTest {
         val store = InMemoryServerHistoryStore()
         val facade = CapturingFacade()
+        val activeServer = ActiveServerHolder()
         val vm = ConnectViewModel(
             machine = facade,
             historyStore = store,
@@ -75,6 +76,7 @@ class ConnectAttemptCoordinatorTest {
             viewModel = vm,
             historyStore = store,
             machine = facade,
+            activeServer = activeServer,
             scope = this,
             nowEpochMs = { 1234L },
             httpClientFor = { _ ->
@@ -93,15 +95,66 @@ class ConnectAttemptCoordinatorTest {
         vm.onSubmit()
         runCurrent()
 
+        // History updated.
         val saved = store.getById("192.168.1.10:8188")
         assertNotNull(saved)
         assertEquals("MacBook", saved.label)
         assertEquals(1234L, saved.lastConnectedAtEpochMs)
-        // No ConnectAttempt failure dispatched.
+
+        // Active server pointer set.
+        assertEquals(saved, activeServer.current.value)
+
+        // Retry dispatched (no-op while Connected; transitions out of
+        // Lost when applicable). No ConnectAttempt failure dispatched.
         assertTrue(
             facade.dispatched.none { it is ConnectionInput.ConnectAttempt },
             "Expected no ConnectAttempt dispatch on success, got: ${facade.dispatched}",
         )
+        assertTrue(
+            facade.dispatched.any { it == ConnectionInput.Retry },
+            "Expected a Retry dispatch on success, got: ${facade.dispatched}",
+        )
+        coord.stop()
+    }
+
+    @Test fun successful_probe_when_in_Lost_state_dispatches_Retry_to_recover() = runTest {
+        // Verifies the Lost → Reconnecting transition path Lily flagged
+        // in PR #18 review (msg `75c88c17`): a Lost user retrying
+        // a different server / their original server should not stay
+        // permanently in Lost.
+        val store = InMemoryServerHistoryStore()
+        val facade = CapturingFacade()
+        // Even though facade.currentState is fixed to Connected here,
+        // a real ConnectionStateMachine in Lost would react to Retry
+        // by entering Reconnecting (verified in
+        // ConnectionStateMachineTest.retry_from_Lost_re_enters_Reconnecting).
+        // This test pins the dispatch contract.
+        val vm = ConnectViewModel(
+            machine = facade,
+            historyStore = store,
+            scope = this,
+            language = ConnectionLanguage.En,
+        )
+        val coord = ConnectAttemptCoordinator(
+            viewModel = vm,
+            historyStore = store,
+            machine = facade,
+            activeServer = ActiveServerHolder(),
+            scope = this,
+            nowEpochMs = { 1L },
+            httpClientFor = { _ ->
+                client {
+                    HttpStatusCode.OK to """{"system":{"comfyui_version":"0.3.4"},"devices":[]}"""
+                }
+            },
+        )
+        coord.start()
+        runCurrent()
+        vm.onHostChanged("192.168.1.10")
+        vm.onPortChanged("8188")
+        vm.onSubmit()
+        runCurrent()
+        assertTrue(facade.dispatched.contains(ConnectionInput.Retry))
         coord.stop()
     }
 
@@ -118,6 +171,7 @@ class ConnectAttemptCoordinatorTest {
             viewModel = vm,
             historyStore = store,
             machine = facade,
+            activeServer = ActiveServerHolder(),
             scope = this,
             nowEpochMs = { 1234L },
             httpClientFor = { _ -> client { HttpStatusCode.NotFound to "" } },
@@ -151,6 +205,7 @@ class ConnectAttemptCoordinatorTest {
             viewModel = vm,
             historyStore = store,
             machine = facade,
+            activeServer = ActiveServerHolder(),
             scope = this,
             nowEpochMs = { 1234L },
             httpClientFor = { _ ->
@@ -171,6 +226,85 @@ class ConnectAttemptCoordinatorTest {
         coord.stop()
     }
 
+    @Test fun probe_failure_does_NOT_set_active_server() = runTest {
+        // Per @Lily PR #18 review: active server is only set on
+        // verified probe success — never from a failed attempt.
+        val store = InMemoryServerHistoryStore()
+        val facade = CapturingFacade()
+        val activeServer = ActiveServerHolder()
+        val vm = ConnectViewModel(
+            machine = facade,
+            historyStore = store,
+            scope = this,
+            language = ConnectionLanguage.En,
+        )
+        val coord = ConnectAttemptCoordinator(
+            viewModel = vm,
+            historyStore = store,
+            machine = facade,
+            activeServer = activeServer,
+            scope = this,
+            nowEpochMs = { 1L },
+            httpClientFor = { _ -> client { HttpStatusCode.NotFound to "" } },
+        )
+        coord.start()
+        runCurrent()
+        vm.onHostChanged("192.168.1.10")
+        vm.onPortChanged("8188")
+        vm.onSubmit()
+        runCurrent()
+        assertEquals(null, activeServer.current.value)
+        coord.stop()
+    }
+
+    @Test fun coordinator_propagates_CancellationException() = runTest {
+        // Regression: per @Lily PR #18 review (msg `75c88c17`),
+        // `catch (t: Throwable)` must not swallow CancellationException
+        // (would break structured concurrency — the VM scope cancelling
+        // the coordinator must propagate to the in-flight probe).
+        val store = InMemoryServerHistoryStore()
+        val facade = CapturingFacade()
+        val cancellingClient = ComfyHttpClient(
+            baseUrl = "http://stub",
+            client = HttpClient(MockEngine { _ ->
+                throw kotlinx.coroutines.CancellationException("test cancel")
+            }) {
+                install(ContentNegotiation) {
+                    json(Json { ignoreUnknownKeys = true })
+                }
+            },
+        )
+        val vm = ConnectViewModel(
+            machine = facade,
+            historyStore = store,
+            scope = this,
+            language = ConnectionLanguage.En,
+        )
+        val coord = ConnectAttemptCoordinator(
+            viewModel = vm,
+            historyStore = store,
+            machine = facade,
+            activeServer = ActiveServerHolder(),
+            scope = this,
+            nowEpochMs = { 1L },
+            httpClientFor = { _ -> cancellingClient },
+        )
+        coord.start()
+        runCurrent()
+        vm.onHostChanged("192.168.1.10")
+        vm.onPortChanged("8188")
+        vm.onSubmit()
+        runCurrent()
+        // Coordinator's launchIn job should be cancelled by the
+        // propagated CancellationException; no ConnectAttempt
+        // dispatched (because the probe was cancelled, not failed).
+        assertTrue(
+            facade.dispatched.filterIsInstance<ConnectionInput.ConnectAttempt>().isEmpty(),
+            "Expected NO ConnectAttempt on cancellation, got: ${facade.dispatched}",
+        )
+        coord.stop()
+    }
+
     @Test fun submit_with_empty_friendly_name_falls_back_to_host_label() = runTest {
         val store = InMemoryServerHistoryStore()
         val facade = CapturingFacade()
@@ -184,6 +318,7 @@ class ConnectAttemptCoordinatorTest {
             viewModel = vm,
             historyStore = store,
             machine = facade,
+            activeServer = ActiveServerHolder(),
             scope = this,
             nowEpochMs = { 1L },
             httpClientFor = { _ ->

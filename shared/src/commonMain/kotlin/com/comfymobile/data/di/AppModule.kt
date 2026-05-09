@@ -1,15 +1,9 @@
 package com.comfymobile.data.di
 
+import com.comfymobile.data.connect.ActiveServerHolder
 import com.comfymobile.data.connect.ConnectAttemptCoordinator
-import com.comfymobile.data.connection.ConnectionStateMachine
-import com.comfymobile.data.connection.ConnectionStateMachineBootstrap
-import com.comfymobile.data.connection.ConnectionStateMachineFacade
-import com.comfymobile.data.descriptor.NodeDescriptorLoader
-import com.comfymobile.data.descriptor.NodeDescriptorRegistry
 import com.comfymobile.data.network.ComfyHttpClient
 import com.comfymobile.data.network.ComfyWebSocketClient
-import com.comfymobile.data.network.ConnectionEffectRunner
-import com.comfymobile.data.network.ConnectionStateReducer
 import com.comfymobile.data.network.WebSocketSource
 import com.comfymobile.data.persistence.JobReconciler
 import com.comfymobile.data.persistence.SettingsServerHistoryStore
@@ -19,12 +13,8 @@ import com.comfymobile.data.platform.createSettings
 import com.comfymobile.data.platform.createSqlDriver
 import com.comfymobile.data.platform.nowEpochMs
 import com.comfymobile.db.ComfyMobileDb
-import com.comfymobile.domain.connection.LifecycleMonitor
-import com.comfymobile.domain.connection.NetworkMonitor
 import com.comfymobile.domain.job.JobRepository
 import com.comfymobile.domain.server.ServerHistoryStore
-import com.comfymobile.presentation.connection.ConnectViewModel
-import com.comfymobile.presentation.connection.ConnectionLanguage
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.plugins.websocket.WebSockets
@@ -39,16 +29,28 @@ import org.koin.dsl.module
 
 /**
  * Application-scoped Koin module. Builds the long-lived, single-
- * instance objects: SqlDriver, ComfyMobileDb, repositories,
- * monitors, descriptor registry, connection state machine + bootstrap.
+ * instance commonMain objects: SqlDriver, ComfyMobileDb,
+ * repositories, ActiveServerHolder, per-server HTTP / WS factories.
  *
- * Platform Koin modules (see `androidMain` / `iosMain`) supply:
- *   - `PlatformContext` (singleton, holding Application Context on Android)
- *   - `NetworkMonitor` (AndroidNetworkMonitor / IosNetworkMonitor)
- *   - `LifecycleMonitor` (AndroidLifecycleMonitor / IosLifecycleMonitor)
+ * **NOT bound here** (deferred to T1.4b part 3d-ii):
+ *  - `ConnectionStateReducer` / `ConnectionEffectRunner` /
+ *    `ConnectionStateMachine` / `ConnectionStateMachineBootstrap` —
+ *    these need a real active-server `ComfyHttpClient` /
+ *    `WebSocketSource` (per @Lily PR #18 review msg `75c88c17`,
+ *    binding them to a localhost stub here would silently route
+ *    history-poll effects to nothing). Part 3d-ii either rebuilds
+ *    them per active server or threads `ActiveServerHolder` into
+ *    the runner so it picks the right baseUrl at effect-run time.
+ *  - `PlatformContext` / `NetworkMonitor` / `LifecycleMonitor` —
+ *    bound by platform Koin modules in `androidMain` / `iosMain`.
+ *  - `NodeDescriptorRegistry` — its load is suspending
+ *    (`Res.readBytes`); App entry point loads + `getKoin().declare`s
+ *    it at startup.
  *
- * The Compose `App()` entry point fetches the [ConnectViewModel]
- * factory from this module via `koinInject` (or platform glue).
+ * The Compose `App()` entry point fetches the
+ * [com.comfymobile.presentation.connection.ConnectViewModel] factory
+ * from this module via `koinInject` (or platform glue) once
+ * everything else is bound.
  */
 fun appModule(): Module = module {
 
@@ -74,23 +76,14 @@ fun appModule(): Module = module {
         SettingsServerHistoryStore(settings = createSettings(context))
     }
 
-    // ----------------------------------------------------------------- descriptor
+    // ----------------------------------------------------------------- active server
     /**
-     * NodeDescriptorRegistry is loaded lazily on first request; the
-     * lambda runs `Res.readBytes` which is a suspend function.
-     * Wrap it in a runBlocking-equivalent when DI consumers need it
-     * synchronously, or expose an async loader. For Phase 1 we
-     * provide a placeholder factory; T1.5 wiring path makes this a
-     * lazy holder.
-     *
-     * v1: skip auto-load here and require the caller to load
-     * explicitly via `NodeDescriptorLoader.load()` in commonMain.
-     * The registry is bound as a single once produced.
+     * Single-source-of-truth for "which server is the user connected
+     * to right now" (per @Lily PR #16 / #18 reviews — history is
+     * candidate list, active server is a different concept).
+     * Coordinator sets this on probe success.
      */
-    // The registry is intentionally NOT created in this module —
-    // wiring it requires a suspending Compose-resources read. The
-    // App entry point loads it once and registers it via
-    // `getKoin().declare(...)` at startup.
+    single<ActiveServerHolder> { ActiveServerHolder() }
 
     // ----------------------------------------------------------------- network
     single<HttpClient>(qualifier = SHARED_HTTP_CLIENT) {
@@ -130,78 +123,25 @@ fun appModule(): Module = module {
         )
     }
 
-    // ----------------------------------------------------------------- connection state machine
-
-    /**
-     * The reducer is parameterless (other than its config) so a
-     * single instance is fine. Tests substitute their own.
-     */
-    single<ConnectionStateReducer> {
-        ConnectionStateReducer(
-            clientIdProvider = { /* TODO: persistent UUID */ "client-uuid-stub" },
-        )
-    }
-
-    /**
-     * Default [ComfyHttpClient] used by the runner's history-poll
-     * effect. Production substitutes the active-server client when
-     * one is connected; until then we wire to a 'localhost' default
-     * which never responds (poll returns failures, harmless).
-     */
-    single<ComfyHttpClient>(qualifier = DEFAULT_HTTP_CLIENT) {
-        get<ComfyHttpClient> { org.koin.core.parameter.parametersOf("http://localhost:8188") }
-    }
-
-    /**
-     * Default [WebSocketSource] using the same localhost stub.
-     */
-    single<WebSocketSource>(qualifier = DEFAULT_WS) {
-        get<WebSocketSource> { org.koin.core.parameter.parametersOf("http://localhost:8188") }
-    }
-
-    single<ConnectionEffectRunner> {
-        ConnectionEffectRunner(
-            http = get(qualifier = DEFAULT_HTTP_CLIENT),
-            ws = get(qualifier = DEFAULT_WS),
-            scope = get(qualifier = APP_SCOPE),
-        )
-    }
-
-    single<ConnectionStateMachine> {
-        ConnectionStateMachine(
-            reducer = get(),
-            runner = get(),
-            scope = get(qualifier = APP_SCOPE),
-        )
-    }
-
-    single<ConnectionStateMachineFacade> { get<ConnectionStateMachine>() }
-
-    single<ConnectionStateMachineBootstrap> {
-        ConnectionStateMachineBootstrap(
-            machine = get(),
-            networkMonitor = get(),
-            lifecycleMonitor = get(),
-            scope = get(qualifier = APP_SCOPE),
-        )
-    }
-
     // ----------------------------------------------------------------- coordinators / view models
+    //
+    // Note: ConnectionStateReducer / ConnectionEffectRunner /
+    // ConnectionStateMachine / ConnectionStateMachineBootstrap are
+    // intentionally NOT bound in this module — they need an
+    // active-server-aware HTTP / WS plumbing that part 3d-ii
+    // assembles on top of `ActiveServerHolder`. ConnectViewModel and
+    // ConnectAttemptCoordinator both depend on the
+    // ConnectionStateMachineFacade binding which part 3d-ii will
+    // also provide. They are still declared as `factory` here so
+    // commonTest compiles; production callers in part 3d-ii must
+    // make sure the facade is bound before resolving.
 
-    factory<ConnectViewModel> { (vmScope: CoroutineScope) ->
-        ConnectViewModel(
-            machine = get(),
-            historyStore = get(),
-            scope = vmScope,
-            language = ConnectionLanguage.Zh,
-        )
-    }
-
-    factory<ConnectAttemptCoordinator> { (vm: ConnectViewModel, vmScope: CoroutineScope) ->
+    factory<ConnectAttemptCoordinator> { (vm: com.comfymobile.presentation.connection.ConnectViewModel, vmScope: CoroutineScope) ->
         ConnectAttemptCoordinator(
             viewModel = vm,
             historyStore = get(),
             machine = get(),
+            activeServer = get(),
             scope = vmScope,
             nowEpochMs = { nowEpochMs() },
             httpClientFor = { baseUrl ->
@@ -213,5 +153,3 @@ fun appModule(): Module = module {
 
 internal val APP_SCOPE = named("app-scope")
 internal val SHARED_HTTP_CLIENT = named("shared-http-client")
-internal val DEFAULT_HTTP_CLIENT = named("default-http-client")
-internal val DEFAULT_WS = named("default-ws")
