@@ -58,8 +58,15 @@ The mobile UI's reduced presentation of a workflow. Decided by a **node descript
 ### Whitelist node
 A node `class_type` listed in the **node descriptor table** as having editable parameters in mobile. The canonical key is the real ComfyUI `class_type`; friendly display names live in the descriptor entry.
 
-Initial set (subject to T0.3 v1 table):
-`CheckpointLoaderSimple`, `CLIPTextEncode`, `KSampler`, `EmptyLatentImage`, `VAEDecode`, `SaveImage`, `LoraLoader`, `ControlNetLoader`.
+Initial set (10 entries, per T0.3 v1 table):
+`CheckpointLoaderSimple`, `CLIPTextEncode`, `KSampler`, `EmptyLatentImage`, `VAEDecode`, `SaveImage`, `LoraLoader`, `ControlNetLoader`, `ControlNetApply`, `ControlNetApplyAdvanced`.
+
+> **ControlNet v1 boundary** (decided 2026-05-10 by Alice + Lily + Priestess, default-adopted unless @nothing objects):
+> - `ControlNetLoader.control_net_name` editable.
+> - `ControlNetApply.strength` editable (Slider 0..2 step 0.05); other params read-only.
+> - `ControlNetApplyAdvanced.strength` editable; `start_percent` / `end_percent` and others read-only.
+> - `LoadImage` (control image) read-only in v1 — swapping the control image is "rebuilding the workflow" and falls into v1.5+.
+> - Legacy `ApplyControlNet` (no `Advanced` suffix) and any custom ControlNet nodes are treated as unknown nodes — read-only and immutable.
 
 ### Unknown node
 Any node whose `type` is not in the descriptor table.
