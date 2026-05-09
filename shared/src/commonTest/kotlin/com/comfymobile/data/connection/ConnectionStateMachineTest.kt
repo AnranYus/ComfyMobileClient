@@ -31,6 +31,7 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -78,13 +79,18 @@ class ConnectionStateMachineTest {
     }
 
     @Test fun ws_drop_via_dispatch_transitions_to_Reconnecting_LAN_FLAKE() = runTest {
+        // Per @Lily PR #12 follow-up review (msg `77de9c6e`): immediate
+        // transitions use runCurrent() so we don't accidentally advance
+        // virtual time past the 30s give-up timer scheduled by the WS
+        // drop. Only the explicit timer tests use advanceTimeBy +
+        // advanceUntilIdle.
         val (machine, _, _) = buildMachine(this)
         machine.start()
-        advanceUntilIdle()
+        runCurrent()
         assertEquals(ConnectionState.Connected, machine.currentState.value)
 
         machine.dispatch(ConnectionInput.Ws(droppedReason = WsDropReason.LAN_FLAKE))
-        advanceUntilIdle()
+        runCurrent()
 
         val state = machine.currentState.value
         val reconnecting = assertIs<ConnectionState.Reconnecting>(state)
@@ -95,10 +101,10 @@ class ConnectionStateMachineTest {
     @Test fun reconnect_then_event_returns_to_Connected_via_runner_emission() = runTest {
         val (machine, _, ws) = buildMachine(this)
         machine.start()
-        advanceUntilIdle()
+        runCurrent()
 
         machine.dispatch(ConnectionInput.Ws(droppedReason = WsDropReason.LAN_FLAKE))
-        advanceUntilIdle()
+        runCurrent()
         // Sanity: now Reconnecting.
         assertIs<ConnectionState.Reconnecting>(machine.currentState.value)
 
@@ -106,7 +112,7 @@ class ConnectionStateMachineTest {
         // we push. Push an event; runner forwards as ConnectionInput.Ws,
         // reducer transitions back to Connected.
         ws.frames.send(WsEvent.Status(queueRemaining = 0))
-        advanceUntilIdle()
+        runCurrent()
 
         assertEquals(ConnectionState.Connected, machine.currentState.value)
         machine.stop()
@@ -115,14 +121,15 @@ class ConnectionStateMachineTest {
     @Test fun give_up_timer_transitions_to_Lost() = runTest {
         val (machine, _, _) = buildMachine(this)
         machine.start()
-        advanceUntilIdle()
+        runCurrent()
 
         machine.dispatch(ConnectionInput.Ws(droppedReason = WsDropReason.LAN_FLAKE))
-        advanceUntilIdle()
+        runCurrent()
 
-        // Default config: 30s give-up timer.
+        // Default config: 30s give-up timer. Explicitly advance time
+        // past it (this is what the test is about).
         advanceTimeBy(31_000)
-        advanceUntilIdle()
+        runCurrent()
 
         val state = machine.currentState.value
         assertIs<ConnectionState.Lost>(state)
@@ -132,14 +139,17 @@ class ConnectionStateMachineTest {
     @Test fun retry_from_Lost_re_enters_Reconnecting() = runTest {
         val (machine, _, _) = buildMachine(this)
         machine.start()
-        advanceUntilIdle()
+        runCurrent()
         machine.dispatch(ConnectionInput.Ws(droppedReason = WsDropReason.LAN_FLAKE))
+        runCurrent()
+        // Trigger the give-up timer to land in Lost.
         advanceTimeBy(31_000)
-        advanceUntilIdle()
+        runCurrent()
         assertIs<ConnectionState.Lost>(machine.currentState.value)
 
+        // Retry is an immediate transition; runCurrent only.
         machine.dispatch(ConnectionInput.Retry)
-        advanceUntilIdle()
+        runCurrent()
         assertIs<ConnectionState.Reconnecting>(machine.currentState.value)
         machine.stop()
     }
@@ -147,9 +157,9 @@ class ConnectionStateMachineTest {
     @Test fun connect_attempt_failure_pins_classified_error_in_Lost() = runTest {
         val (machine, _, _) = buildMachine(this)
         machine.start()
-        advanceUntilIdle()
+        runCurrent()
         machine.dispatch(ConnectionInput.ConnectAttempt(classified = ConnectError.NOT_COMFYUI))
-        advanceUntilIdle()
+        runCurrent()
         val lost = assertIs<ConnectionState.Lost>(machine.currentState.value)
         assertEquals(ConnectError.NOT_COMFYUI, lost.error)
         machine.stop()
@@ -160,11 +170,11 @@ class ConnectionStateMachineTest {
         machine.start()
         machine.start()
         machine.start()
-        advanceUntilIdle()
+        runCurrent()
         // No throw, single observer; verify by dispatching once and
         // confirming a single state transition (not three).
         machine.dispatch(ConnectionInput.Ws(droppedReason = WsDropReason.LAN_FLAKE))
-        advanceUntilIdle()
+        runCurrent()
         assertIs<ConnectionState.Reconnecting>(machine.currentState.value)
         machine.stop()
     }
@@ -174,9 +184,9 @@ class ConnectionStateMachineTest {
         machine.start()
         // start collector first per the established pattern
         val collector = async { machine.errors.take(1).toList() }
-        advanceUntilIdle()
+        runCurrent()
         machine.dispatch(ConnectionInput.ConnectAttempt(classified = ConnectError.WRONG_PORT_404))
-        advanceUntilIdle()
+        runCurrent()
         val errors = collector.await()
         assertEquals(listOf(ConnectError.WRONG_PORT_404), errors)
         machine.stop()
@@ -203,7 +213,7 @@ class ConnectionStateMachineTest {
         // queued; with the previous MutableSharedFlow it was lost.
         machine.dispatch(ConnectionInput.Ws(droppedReason = WsDropReason.LAN_FLAKE))
         machine.start()
-        advanceUntilIdle()
+        runCurrent()
         assertIs<ConnectionState.Reconnecting>(machine.currentState.value)
         machine.stop()
     }
@@ -215,7 +225,7 @@ class ConnectionStateMachineTest {
         machine.dispatch(ConnectionInput.Retry)             // re-issues OpenWs
         machine.dispatch(ConnectionInput.ConnectAttempt(classified = ConnectError.NOT_COMFYUI))
         machine.start()
-        advanceUntilIdle()
+        runCurrent()
         // Final state should be Lost(NOT_COMFYUI) — the last dispatch
         // wins after the reducer chains through all three.
         val lost = assertIs<ConnectionState.Lost>(machine.currentState.value)
