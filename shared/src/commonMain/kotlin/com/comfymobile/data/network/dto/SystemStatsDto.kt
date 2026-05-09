@@ -4,13 +4,18 @@ import kotlinx.serialization.Serializable
 
 /**
  * Subset of `GET /system_stats` we care about. Used as a "is this
- * really ComfyUI?" probe during the connect flow — the presence of a
- * `system.comfyui_version` field plus a `devices` array is the
- * defining signature.
+ * really ComfyUI?" probe during the connect flow.
  *
- * Lenient on unknown fields so the client tolerates new fields ComfyUI
- * may add later. Strict on the version + devices presence so the
- * NOT_COMFYUI classification works.
+ * The DTO itself is lenient — it accepts unknown fields (forward-
+ * compat with new ComfyUI versions) and even tolerates missing
+ * fields including an empty `devices` list (some headless deployments
+ * report no GPUs). The actual signature check happens after parse,
+ * inside [com.comfymobile.data.network.ComfyHttpClient.getSystemStats]:
+ * a non-null/non-blank `system.comfyui_version` is required, and
+ * anything weaker throws `ComfyHttpException.MissingField`. Keeping
+ * the DTO lenient + the probe strict means future ComfyUI changes
+ * to other fields don't break us, while non-ComfyUI servers that
+ * happen to emit a vaguely matching JSON shape are still rejected.
  */
 @Serializable
 data class SystemStatsDto(

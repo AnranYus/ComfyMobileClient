@@ -6,6 +6,7 @@ import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.MockRequestHandleScope
 import io.ktor.client.engine.mock.respond
 import io.ktor.client.engine.mock.respondOk
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.HttpRequestData
 import io.ktor.client.request.HttpResponseData
 import io.ktor.http.ContentType
@@ -13,6 +14,7 @@ import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
+import io.ktor.serialization.kotlinx.json.json
 import io.ktor.utils.io.ByteReadChannel
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
@@ -42,8 +44,8 @@ class ComfyHttpClientTest {
     private fun client(handler: suspend MockRequestHandleScope.(HttpRequestData) -> HttpResponseData):
         ComfyHttpClient {
         val mock = HttpClient(MockEngine { request -> handler(request) }) {
-            install(io.ktor.client.plugins.contentnegotiation.ContentNegotiation) {
-                io.ktor.serialization.kotlinx.json.json(
+            install(ContentNegotiation) {
+                json(
                     Json {
                         ignoreUnknownKeys = true
                         isLenient = false
