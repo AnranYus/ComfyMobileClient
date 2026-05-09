@@ -55,11 +55,26 @@ class ComfyHttpClient(
      * Liveness + signature probe. Used by the connect flow to decide
      * NOT_COMFYUI vs WRONG_PORT_404 vs OK.
      *
+     * In addition to a successful parse the response must carry a
+     * non-null `system.comfyui_version` — otherwise an arbitrary
+     * service returning `{"system":{},"devices":[]}` would slip
+     * through as ComfyUI. Caught by @Lily PR #5 review (msg `0a0827f6`).
+     *
      * @throws ComfyHttpException.HttpStatus on non-2xx
      * @throws ComfyHttpException.MalformedResponse on parse error
+     * @throws ComfyHttpException.MissingField when the response shape
+     *         parses but the ComfyUI signature is absent
      */
-    suspend fun getSystemStats(): SystemStatsDto =
-        get(path = "/system_stats", endpointTag = "/system_stats")
+    suspend fun getSystemStats(): SystemStatsDto {
+        val stats: SystemStatsDto = get(path = "/system_stats", endpointTag = "/system_stats")
+        if (stats.system.comfyui_version.isNullOrBlank()) {
+            throw ComfyHttpException.MissingField(
+                endpoint = "/system_stats",
+                field = "system.comfyui_version",
+            )
+        }
+        return stats
+    }
 
     /** Full node-class catalog. The result is huge; cache aggressively. */
     suspend fun getObjectInfo(): JsonElement =

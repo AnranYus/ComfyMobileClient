@@ -95,6 +95,25 @@ class ComfyHttpClientTest {
         assertTrue(stats.devices.isEmpty())
     }
 
+    @Test fun system_stats_without_comfyui_version_throws_MissingField() = runTest {
+        // Per @Lily PR #5 review: an unrelated service responding with
+        // a syntactically compatible {"system":{}, "devices":[]} body
+        // must NOT pass the connect probe. Catch the missing
+        // signature explicitly.
+        val client = client { json("""{"system":{},"devices":[]}""") }
+        val ex = assertFailsWith<ComfyHttpException.MissingField> { client.getSystemStats() }
+        assertEquals("/system_stats", ex.endpoint)
+        assertEquals("system.comfyui_version", ex.field)
+    }
+
+    @Test fun system_stats_with_blank_comfyui_version_throws_MissingField() = runTest {
+        val client = client {
+            json("""{"system":{"comfyui_version":""},"devices":[]}""")
+        }
+        val ex = assertFailsWith<ComfyHttpException.MissingField> { client.getSystemStats() }
+        assertEquals("system.comfyui_version", ex.field)
+    }
+
     @Test fun system_stats_404_throws_HttpStatus_with_status_code() = runTest {
         val client = client {
             respond(
@@ -338,7 +357,7 @@ class ComfyHttpClientTest {
         var capturedPath: String? = null
         val client = client { request ->
             capturedPath = request.url.encodedPath
-            json("""{"system":{},"devices":[]}""")
+            json("""{"system":{"comfyui_version":"0.3.4"},"devices":[]}""")
         }
         client.getSystemStats()
         assertEquals("/system_stats", capturedPath)
