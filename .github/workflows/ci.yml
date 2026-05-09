@@ -60,6 +60,9 @@ jobs:
           # package name and fails with "Failed to find package".
           packages: "platforms;android-34 build-tools;34.0.0 platform-tools"
 
+      - name: Run shared unit tests (Android target)
+        run: ./gradlew :shared:testDebugUnitTest --stacktrace
+
       - name: Assemble debug APK
         run: ./gradlew :androidApp:assembleDebug --stacktrace
 

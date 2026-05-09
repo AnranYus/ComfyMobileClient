@@ -50,6 +50,15 @@ kotlin {
     }
 }
 
+// Pin the generated `Res` class to a stable package so production code
+// has a predictable import. Compose Multiplatform infers a default if
+// this is omitted, but we'd rather not depend on the inference.
+compose.resources {
+    publicResClass = false
+    packageOfResClass = "com.comfymobile.resources"
+    generateResClass = auto
+}
+
 android {
     namespace = "com.comfymobile.shared"
     compileSdk = libs.versions.android.compileSdk.get().toInt()
