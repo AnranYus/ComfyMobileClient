@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -338,7 +339,13 @@ class ConnectAttemptCoordinatorTest {
             // verify by stopping the coordinator and inspecting the
             // final dispatched list — it must NOT contain a
             // ConnectAttempt.
-            kotlinx.coroutines.test.runCurrent()
+            // `runCurrent()` is an extension on TestScope; calling
+            // fully-qualified breaks Android compile (the compiler
+            // parses it as a top-level call and can't bind the
+            // extension receiver). Use the imported form so the
+            // implicit `this: TestScope` receiver from `runTest` is
+            // picked up.
+            runCurrent()
             assertTrue(
                 facade.dispatched.value
                     .filterIsInstance<ConnectionInput.ConnectAttempt>().isEmpty(),
