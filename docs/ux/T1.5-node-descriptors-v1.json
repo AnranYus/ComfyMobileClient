@@ -1,0 +1,252 @@
+{
+  "version": 1,
+  "descriptors": [
+    {
+      "classType": "CheckpointLoaderSimple",
+      "displayName": { "zh": "加载基础模型", "en": "Load Checkpoint" },
+      "helpText": { "zh": "主模型（决定生成的整体风格和质量）。" },
+      "category": "loader",
+      "editableParams": [
+        {
+          "name": "ckpt_name",
+          "displayName": { "zh": "模型", "en": "Checkpoint" },
+          "control": {
+            "type": "ModelPicker",
+            "source": { "kind": "ModelFolder", "folder": "checkpoints" }
+          },
+          "helpText": { "zh": "选择基础模型 (.safetensors / .ckpt)。" }
+        }
+      ]
+    },
+    {
+      "classType": "CLIPTextEncode",
+      "displayName": { "zh": "提示词", "en": "Prompt" },
+      "helpText": { "zh": "描述你想生成的内容；通常工作流里有\"正向\"和\"反向\"两个。" },
+      "category": "prompt",
+      "editableParams": [
+        {
+          "name": "text",
+          "displayName": { "zh": "提示词文本", "en": "Text" },
+          "control": {
+            "type": "MultilineText",
+            "autocomplete": ["embedding", "lora"]
+          },
+          "helpText": { "zh": "描述你想要的画面；输入 < 可补全 LoRA，输入 embedding: 可补全 embedding。" }
+        }
+      ]
+    },
+    {
+      "classType": "KSampler",
+      "displayName": { "zh": "采样器", "en": "Sampler" },
+      "helpText": { "zh": "控制采样过程；最常调的是 seed / steps / cfg。" },
+      "category": "sampler",
+      "editableParams": [
+        {
+          "name": "seed",
+          "displayName": { "zh": "随机种子", "en": "Seed" },
+          "control": { "type": "Integer" },
+          "helpText": { "zh": "同种子+同参数=同图。UI 层渲染为带 🎲 随机 + 🔒 锁定按钮的种子输入。" }
+        },
+        {
+          "name": "steps",
+          "displayName": { "zh": "步数", "en": "Steps" },
+          "control": {
+            "type": "Slider",
+            "min": 1,
+            "max": 150,
+            "step": 1,
+            "presets": [
+              { "label": "Quick", "value": 20 },
+              { "label": "Default", "value": 30 },
+              { "label": "High", "value": 50 }
+            ]
+          },
+          "helpText": { "zh": "采样迭代次数。多 = 更精细但更慢；20–30 通常足够。" }
+        },
+        {
+          "name": "cfg",
+          "displayName": { "zh": "提示词强度", "en": "CFG" },
+          "control": {
+            "type": "Slider",
+            "min": 0,
+            "max": 30,
+            "step": 0.5
+          },
+          "helpText": { "zh": "提示词对生成的约束力。7 是常用起点；过高会过曝/扭曲。" }
+        },
+        {
+          "name": "sampler_name",
+          "displayName": { "zh": "采样算法", "en": "Sampler" },
+          "control": {
+            "type": "Dropdown",
+            "source": { "kind": "NodeEnumFromObjectInfo", "param": "sampler_name" }
+          },
+          "helpText": { "zh": "算法不同观感不同；不知道选哪个就用 euler 或 dpmpp_2m。" }
+        },
+        {
+          "name": "scheduler",
+          "displayName": { "zh": "调度器", "en": "Scheduler" },
+          "control": {
+            "type": "Dropdown",
+            "source": { "kind": "NodeEnumFromObjectInfo", "param": "scheduler" }
+          },
+          "helpText": { "zh": "配合采样算法决定噪声衰减曲线；常用 normal / karras。" }
+        },
+        {
+          "name": "denoise",
+          "displayName": { "zh": "去噪强度", "en": "Denoise" },
+          "control": {
+            "type": "Slider",
+            "min": 0,
+            "max": 1,
+            "step": 0.05
+          },
+          "helpText": { "zh": "1.0 = 从头生图；< 1.0 = 在原图上修改（图生图常用）。" }
+        }
+      ]
+    },
+    {
+      "classType": "EmptyLatentImage",
+      "displayName": { "zh": "空白画布", "en": "Empty Latent" },
+      "helpText": { "zh": "设定生成图的尺寸和数量。" },
+      "category": "input",
+      "editableParams": [
+        {
+          "name": "width",
+          "displayName": { "zh": "宽度", "en": "Width" },
+          "control": {
+            "type": "Slider",
+            "min": 64,
+            "max": 2048,
+            "step": 64,
+            "presets": [
+              { "value": 512 },
+              { "value": 768 },
+              { "value": 1024 },
+              { "value": 1536 }
+            ]
+          },
+          "helpText": { "zh": "像素宽度；常见 512/768（SD 1.5）或 1024（SDXL）。" }
+        },
+        {
+          "name": "height",
+          "displayName": { "zh": "高度", "en": "Height" },
+          "control": {
+            "type": "Slider",
+            "min": 64,
+            "max": 2048,
+            "step": 64,
+            "presets": [
+              { "value": 512 },
+              { "value": 768 },
+              { "value": 1024 },
+              { "value": 1536 }
+            ]
+          },
+          "helpText": { "zh": "像素高度。" }
+        },
+        {
+          "name": "batch_size",
+          "displayName": { "zh": "批量", "en": "Batch" },
+          "control": { "type": "Integer", "min": 1, "max": 8 },
+          "helpText": { "zh": "一次生成几张图；多 = 慢且占显存。UI 层可渲染为 +/- 步进变体。" }
+        }
+      ]
+    },
+    {
+      "classType": "VAEDecode",
+      "displayName": { "zh": "VAE 解码", "en": "VAE Decode" },
+      "helpText": { "zh": "把潜空间张量解码回图像；通常无需调整。" },
+      "category": "processing",
+      "editableParams": []
+    },
+    {
+      "classType": "SaveImage",
+      "displayName": { "zh": "保存图片", "en": "Save Image" },
+      "helpText": { "zh": "让 ComfyUI 把生图保存到服务器的 output 目录。" },
+      "category": "output",
+      "editableParams": [
+        {
+          "name": "filename_prefix",
+          "displayName": { "zh": "文件名前缀", "en": "Filename Prefix" },
+          "control": { "type": "SingleLineText" },
+          "helpText": { "zh": "保存文件名前缀（可加日期或工作流名）。" }
+        }
+      ]
+    },
+    {
+      "classType": "LoraLoader",
+      "displayName": { "zh": "LoRA", "en": "LoRA" },
+      "helpText": { "zh": "在基础模型上叠加 LoRA 风格/角色权重。" },
+      "category": "loader",
+      "editableParams": [
+        {
+          "name": "lora_name",
+          "displayName": { "zh": "LoRA 模型", "en": "LoRA" },
+          "control": {
+            "type": "ModelPicker",
+            "source": { "kind": "ModelFolder", "folder": "loras" }
+          },
+          "helpText": { "zh": "选择已安装的 LoRA 文件。" }
+        },
+        {
+          "name": "strength_model",
+          "displayName": { "zh": "模型强度", "en": "Strength (Model)" },
+          "control": { "type": "Slider", "min": 0, "max": 2, "step": 0.05 },
+          "helpText": { "zh": "LoRA 对主模型的影响强度；常用 0.6–1.0。" }
+        },
+        {
+          "name": "strength_clip",
+          "displayName": { "zh": "提示词强度", "en": "Strength (CLIP)" },
+          "control": { "type": "Slider", "min": 0, "max": 2, "step": 0.05 },
+          "helpText": { "zh": "LoRA 对提示词理解的影响；通常与模型强度同步。" }
+        }
+      ]
+    },
+    {
+      "classType": "ControlNetLoader",
+      "displayName": { "zh": "ControlNet 加载", "en": "Load ControlNet" },
+      "helpText": { "zh": "加载 ControlNet 控制模型（边缘 / 姿态 / 深度等）。" },
+      "category": "loader",
+      "editableParams": [
+        {
+          "name": "control_net_name",
+          "displayName": { "zh": "ControlNet 模型", "en": "ControlNet" },
+          "control": {
+            "type": "ModelPicker",
+            "source": { "kind": "ModelFolder", "folder": "controlnet" }
+          },
+          "helpText": { "zh": "选择已安装的 ControlNet 模型。" }
+        }
+      ]
+    },
+    {
+      "classType": "ControlNetApply",
+      "displayName": { "zh": "ControlNet 应用", "en": "Apply ControlNet" },
+      "helpText": { "zh": "把 ControlNet 施加到提示词条件上，强度决定它的影响力。" },
+      "category": "controlnet",
+      "editableParams": [
+        {
+          "name": "strength",
+          "displayName": { "zh": "ControlNet 强度", "en": "Strength" },
+          "control": { "type": "Slider", "min": 0, "max": 2, "step": 0.05 },
+          "helpText": { "zh": "ControlNet 对生成的影响强度；常用 0.6–1.0。" }
+        }
+      ]
+    },
+    {
+      "classType": "ControlNetApplyAdvanced",
+      "displayName": { "zh": "ControlNet 应用（高级）", "en": "Apply ControlNet (Advanced)" },
+      "helpText": { "zh": "高级版 ControlNet 应用；额外含 start/end percent，但 v1 仅暴露 strength，其余只读保持默认。" },
+      "category": "controlnet",
+      "editableParams": [
+        {
+          "name": "strength",
+          "displayName": { "zh": "ControlNet 强度", "en": "Strength" },
+          "control": { "type": "Slider", "min": 0, "max": 2, "step": 0.05 },
+          "helpText": { "zh": "ControlNet 对生成的影响强度；常用 0.6–1.0。" }
+        }
+      ]
+    }
+  ]
+}
