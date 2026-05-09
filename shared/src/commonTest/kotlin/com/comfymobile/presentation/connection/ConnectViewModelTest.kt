@@ -1,5 +1,6 @@
 package com.comfymobile.presentation.connection
 
+import com.comfymobile.data.connect.ActiveServerHolder
 import com.comfymobile.data.network.ConnectionInput
 import com.comfymobile.data.network.ConnectionState
 import com.comfymobile.data.persistence.InMemoryServerHistoryStore
@@ -11,6 +12,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -173,6 +175,52 @@ class ConnectViewModelTest {
 
         assertTrue(!viewModel.screenState.value.showErrorDetails)
         assertTrue(machine.dispatchedInputs.isEmpty())
+        coroutineContext.cancelChildren()
+    }
+
+    @Test fun screenState_reflects_active_server_label_after_setActive() = runTest {
+        // Per @Lily PR #19 review (`4413957569`) blocker 2:
+        // ConnectViewModel must observe ActiveServerHolder so a
+        // successful probe — which calls activeServer.setActive(...) —
+        // surfaces in ConnectScreenState.activeServer + statusUi.
+        val store = InMemoryServerHistoryStore()
+        val activeServer = ActiveServerHolder()
+        val viewModel = ConnectViewModel(
+            machine = FakeConnectionStateMachine(ConnectionState.Connected),
+            historyStore = store,
+            scope = this,
+            activeServer = activeServer,
+        )
+        // Initially no active server.
+        advanceUntilIdle()
+        assertNull(viewModel.screenState.value.activeServer)
+        assertTrue(!viewModel.screenState.value.shouldShowStatusIndicator)
+
+        // Coordinator-equivalent action: probe succeeded → setActive.
+        val server = ServerInfo(
+            serverId = "192.168.1.5:8188",
+            host = "192.168.1.5",
+            port = 8188,
+            label = "Studio Mac",
+            lastConnectedAtEpochMs = 1234L,
+        )
+        activeServer.setActive(server)
+        advanceUntilIdle()
+
+        val state = viewModel.screenState.value
+        // (i) ConnectScreenState.activeServer != null
+        assertNotNull(state.activeServer)
+        assertEquals("Studio Mac", state.activeServer!!.label)
+        // (ii) shouldShowStatusIndicator == true (Connected state +
+        // active server makes the indicator visible per
+        // ConnectScreenState.shouldShowStatusIndicator).
+        assertTrue(state.shouldShowStatusIndicator)
+        // (iii) statusUi label includes the friendly name.
+        val labelEn = state.statusUi.label.resolve(ConnectionLanguage.En)
+        assertTrue(
+            labelEn.contains("Studio Mac"),
+            "Expected status label to include friendly name 'Studio Mac', got: $labelEn",
+        )
         coroutineContext.cancelChildren()
     }
 }

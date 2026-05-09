@@ -10,7 +10,7 @@ import com.comfymobile.data.di.androidPlatformModule
 import com.comfymobile.data.di.appModule
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
-import org.koin.core.context.GlobalContext
+import org.koin.core.KoinApplication
 import org.koin.core.context.startKoin
 
 /**
@@ -26,27 +26,37 @@ import org.koin.core.context.startKoin
  *  3. Start the platform-monitor bootstrap once (idempotent).
  *  4. Asynchronously load [NodeDescriptorRegistry] from
  *     `Res.readBytes` (`composeResources/files/node-descriptors/v1.json`)
- *     and `getKoin().declare()` it so later consumers (workflow
- *     editor, T1.5 dependents) can inject it.
+ *     and `koin.declare()` it so later consumers (workflow editor,
+ *     T1.5 dependents) can inject it.
  *
  * Activity recreation never touches any of the above — it only
  * re-renders the Compose tree.
+ *
+ * Per @Lily PR #19 review comment `4413957569` blocker 1: the
+ * [KoinApplication] returned by [startKoin] is held directly so the
+ * iOS K/N target compiles uniformly with the same pattern (no
+ * `GlobalContext` lookup).
  *
  * Registered via `<application android:name>` in `AndroidManifest.xml`.
  */
 class ComfyMobileApplication : Application() {
 
+    private var koinApp: KoinApplication? = null
+
     override fun onCreate() {
         super.onCreate()
 
-        startKoin {
+        if (koinApp != null) return
+
+        val app = startKoin {
             modules(
                 appModule(),
                 androidPlatformModule(applicationContext),
             )
         }
+        koinApp = app
 
-        val koin = GlobalContext.get()
+        val koin = app.koin
 
         // Start the state machine + monitor bootstrap. Both are
         // idempotent (PR #18 thread `62385887` review constraint),
@@ -59,7 +69,7 @@ class ComfyMobileApplication : Application() {
         // but Phase 2 workflow editor will.
         koin.get<CoroutineScope>(qualifier = APP_SCOPE).launch {
             val registry = NodeDescriptorLoader.load()
-            GlobalContext.get().declare<NodeDescriptorRegistry>(registry)
+            koin.declare<NodeDescriptorRegistry>(registry)
         }
     }
 }

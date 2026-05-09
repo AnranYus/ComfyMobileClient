@@ -1,5 +1,6 @@
 package com.comfymobile.presentation.connection
 
+import com.comfymobile.data.connect.ActiveServerHolder
 import com.comfymobile.data.connection.ConnectionStateMachineFacade
 import com.comfymobile.data.network.ConnectErrorContext
 import com.comfymobile.data.network.ConnectionInput
@@ -27,6 +28,7 @@ class ConnectViewModel(
     private val machine: ConnectionStateMachineFacade,
     private val historyStore: ServerHistoryStore,
     private val scope: CoroutineScope,
+    private val activeServer: ActiveServerHolder = ActiveServerHolder(),
     private val language: ConnectionLanguage = ConnectionLanguage.En,
 ) {
     private val formState = MutableStateFlow(ServerFormState())
@@ -38,25 +40,42 @@ class ConnectViewModel(
 
     val events = eventsChannel.receiveAsFlow()
 
-    private val errorPresentation = combine(errorContext, showErrorDetails) { context, showDetails ->
-        ErrorPresentation(context = context, showDetails = showDetails)
-    }
+    /**
+     * Pre-combine `errorPresentation` + `activeServer.current` into a
+     * single flow so the outer [combine] stays at 5 sources. Per
+     * @Lily PR #19 review (`4413957569`) blocker 2: the connected UI
+     * must surface `activeServer` via [ConnectScreenState.activeServer]
+     * — without this, `Connected` renders without the friendly server
+     * name and `shouldShowStatusIndicator` hides the indicator.
+     */
+    private data class UiInputs(
+        val errorPresentation: ErrorPresentation,
+        val activeServer: ServerInfo?,
+    )
+
+    private val uiInputs = combine(
+        combine(errorContext, showErrorDetails) { context, showDetails ->
+            ErrorPresentation(context = context, showDetails = showDetails)
+        },
+        activeServer.current,
+    ) { error, server -> UiInputs(error, server) }
 
     val screenState: StateFlow<ConnectScreenState> = combine(
         machine.currentState,
         historyStore.observeAll(),
         formState,
         modalState,
-        errorPresentation,
-    ) { connectionState, history, form, modal, error ->
+        uiInputs,
+    ) { connectionState, history, form, modal, ui ->
         val validation = ServerFormValidator.validate(form, history.map { it.label })
         ConnectScreenState(
             connectionState = connectionState,
             formState = form,
             formValidation = validation,
             history = history,
-            errorContext = error.context,
-            showErrorDetails = error.showDetails,
+            activeServer = ui.activeServer,
+            errorContext = ui.errorPresentation.context,
+            showErrorDetails = ui.errorPresentation.showDetails,
             friendlyNameModal = modal,
             language = language,
         )
@@ -65,6 +84,7 @@ class ConnectViewModel(
         started = SharingStarted.Eagerly,
         initialValue = ConnectScreenState(
             connectionState = machine.currentState.value,
+            activeServer = activeServer.current.value,
             language = language,
         ),
     )

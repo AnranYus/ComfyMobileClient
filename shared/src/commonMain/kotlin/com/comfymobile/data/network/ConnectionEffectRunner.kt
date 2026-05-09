@@ -2,6 +2,7 @@ package com.comfymobile.data.network
 
 import com.comfymobile.data.connect.ActiveServerHolder
 import com.comfymobile.domain.server.ServerInfo
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
@@ -12,7 +13,6 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.consumeAsFlow
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
@@ -30,7 +30,7 @@ import kotlinx.coroutines.launch
  *  - [SideEffectIntent.CancelTimer]       → cancels the corresponding job
  *  - [SideEffectIntent.EmitError]         → forwards on [emittedErrors] for the UI to consume
  *
- * ### Active-server awareness (T1.4b part 3d-ii, @Lily PR #18 thread)
+ * ### Active-server awareness (T1.4b part 3d-ii, @Lily PR #18 / #19 thread)
  *
  * The runner does NOT capture a single `ComfyHttpClient` /
  * `WebSocketSource` at construction. Instead it takes:
@@ -40,20 +40,41 @@ import kotlinx.coroutines.launch
  *    factories invoked at effect-run time so each effect uses the
  *    *current* active server's baseUrl, not a stale one.
  *
- * Two contract invariants come from this design:
- *  1. **No active server → explicit error, no IO.** Any side effect
- *     that needs a server (`OpenWs`, `PollHistory`, `PollActiveHistory`)
- *     while [ActiveServerHolder.current] is `null` emits
- *     [ConnectError.NO_ACTIVE_SERVER] on [emittedErrors] and does
- *     **not** route to a default URL or any previously-active server.
- *     Per @Lily / @Ores final convergence (PR #18 thread msg
- *     `b522a9f3` / `60a7e64a`).
- *  2. **Active-server change cancels in-flight IO.** A server-observer
- *     job watches [ActiveServerHolder.current] and cancels the WS
- *     session and any in-flight history-poll jobs whenever the active
- *     server changes (or becomes null), so a switch to a new server
- *     never leaves a half-open WS or pending poll talking to the old
- *     baseUrl.
+ * Three contract invariants come from this design:
+ *
+ *  1. **No active server → explicit `Lost(NO_ACTIVE_SERVER)`, no IO.**
+ *     Any side effect that needs a server (`OpenWs`, `PollHistory`,
+ *     `PollActiveHistory`) while [ActiveServerHolder.current] is
+ *     `null` performs **zero IO** and:
+ *     a) emits [ConnectError.NO_ACTIVE_SERVER] on [emittedErrors]
+ *        (replay = 1 so a late UI subscriber still sees it), AND
+ *     b) sends [ConnectionInput.ConnectAttempt] with that error onto
+ *        [producedInputs] so the state machine reducer transitions
+ *        to `Lost(NO_ACTIVE_SERVER)` and the UI surfaces @Ores's
+ *        "Pick a server" copy. Per @Lily PR #19 review comment
+ *        `4413957569` blocker 3: emitting on `errors` alone leaves
+ *        the state machine stuck in `Reconnecting` with no visible
+ *        error panel.
+ *
+ *  2. **Active-server change cancels in-flight server-bound IO,
+ *     synchronously, before any new IO starts.** Each `run(intent)`
+ *     entry-point snapshots [ActiveServerHolder.current] and, if the
+ *     observed server id differs from the previously-observed one,
+ *     synchronously cancels the WS job and any in-flight history
+ *     polls *before* launching new IO. There is **no async observer
+ *     coroutine** — Lily PR #19 review comment `4413957569` blocker
+ *     4 specifically called out the race where an async observer
+ *     could cancel the *new* server's job. The synchronous-sync
+ *     approach mirrors Lily's recommendation: "synchronously update
+ *     the runner's observed server before starting new IO."
+ *
+ *  3. **Cancellation propagates.** History-poll coroutines treat
+ *     [CancellationException] as structured-concurrency cancellation
+ *     and rethrow it. They do NOT classify it as
+ *     `HistoryProbeResult.Error(UNKNOWN)` (which would emit a stale
+ *     probe result for a server we no longer care about). Same
+ *     pattern as [com.comfymobile.data.connect.ConnectAttemptCoordinator]
+ *     (PR #18 thread `75c88c17`).
  *
  * Tests inject a `CoroutineScope` backed by `TestScope` and drive the
  * runner with virtual time, asserting on the inputs the runner sends
@@ -105,21 +126,13 @@ class ConnectionEffectRunner(
      */
     private val pollJobs = mutableSetOf<Job>()
 
-    /** Server observer; cancels server-bound IO on active-server change. */
-    private var serverObserverJob: Job? = scope.launch {
-        // `drop(1)` because the StateFlow's initial value is the
-        // current snapshot — we only react to *changes*. Without this
-        // we would cancel nothing on first emission anyway, but the
-        // semantics are clearer by skipping it explicitly.
-        var lastObservedServerId: String? = activeServer.current.value?.serverId
-        activeServer.current.drop(1).collect { newServer ->
-            val newId = newServer?.serverId
-            if (newId != lastObservedServerId) {
-                cancelServerBoundIo()
-                lastObservedServerId = newId
-            }
-        }
-    }
+    /**
+     * Server id we last synced with. Updated by [syncActiveServer]
+     * which runs synchronously inside [run] before any new IO is
+     * launched, so a `setActive(B)` followed by an immediate
+     * `run(OpenWs)` cannot race against an async observer.
+     */
+    private var lastObservedServerId: String? = activeServer.current.value?.serverId
 
     fun trackInFlight(promptId: String) {
         activePromptIds.add(promptId)
@@ -137,15 +150,25 @@ class ConnectionEffectRunner(
     }
 
     fun run(intent: SideEffectIntent) {
+        // Synchronously detect active-server change and cancel any
+        // server-bound IO from the previous server BEFORE we launch
+        // new IO. No async observer coroutine — see class KDoc
+        // invariant 2.
+        val currentServer = activeServer.current.value
+        syncActiveServer(currentServer)
+
         when (intent) {
-            is SideEffectIntent.OpenWs -> withActiveServerOrEmit { server ->
-                openWs(server, intent.clientId)
+            is SideEffectIntent.OpenWs -> {
+                if (currentServer == null) dispatchNoActiveServer()
+                else openWs(currentServer, intent.clientId)
             }
-            is SideEffectIntent.PollHistory -> withActiveServerOrEmit { server ->
-                pollHistory(server, intent.promptId)
+            is SideEffectIntent.PollHistory -> {
+                if (currentServer == null) dispatchNoActiveServer()
+                else pollHistory(currentServer, intent.promptId)
             }
-            SideEffectIntent.PollActiveHistory -> withActiveServerOrEmit { server ->
-                activePromptIds.toList().forEach { pollHistory(server, it) }
+            SideEffectIntent.PollActiveHistory -> {
+                if (currentServer == null) dispatchNoActiveServer()
+                else activePromptIds.toList().forEach { pollHistory(currentServer, it) }
             }
             // Timers are protocol-level (reconnect cadence); they do
             // not depend on the active server, so we run them
@@ -161,8 +184,6 @@ class ConnectionEffectRunner(
     /** Cancels in-flight timers + WS job. Use when the surrounding
      *  scope is being torn down (e.g. user signs out / app exits). */
     suspend fun shutdown() {
-        serverObserverJob?.cancelAndJoin()
-        serverObserverJob = null
         timerJobs.values.forEach { runCatching { it.cancelAndJoin() } }
         timerJobs.clear()
         wsJob?.cancelAndJoin()
@@ -175,31 +196,36 @@ class ConnectionEffectRunner(
     // ----------------------------------------------------------------- private
 
     /**
-     * Snapshot [ActiveServerHolder.current] and either call [block]
-     * with the resolved [ServerInfo] or — when no server is active —
-     * emit [ConnectError.NO_ACTIVE_SERVER] without performing any IO.
+     * If the active server's id has changed since the previous
+     * `run()` invocation, synchronously cancel the WS session + any
+     * in-flight history polls before any new IO is launched.
      *
-     * Per @Lily PR #18 thread msg `60a7e64a`: this is a first-class
-     * user-facing error path, NOT a silent no-op. The state machine
-     * reducer transitions to `Lost(NO_ACTIVE_SERVER)` and the UI
-     * surfaces @Ores's "Pick a server or enter again" copy.
+     * Called *before* dispatching the current intent's branch, so the
+     * new server's launches happen against fresh slot state.
      */
-    private inline fun withActiveServerOrEmit(block: (ServerInfo) -> Unit) {
-        val server = activeServer.current.value
-        if (server == null) {
-            errorFlow.tryEmit(ConnectError.NO_ACTIVE_SERVER)
-            return
+    private fun syncActiveServer(currentServer: ServerInfo?) {
+        val newId = currentServer?.serverId
+        if (newId != lastObservedServerId) {
+            wsJob?.cancel()
+            wsJob = null
+            val pollSnapshot = pollJobs.toList()
+            pollJobs.clear()
+            pollSnapshot.forEach { it.cancel() }
+            lastObservedServerId = newId
         }
-        block(server)
     }
 
-    /** Cancels in-flight server-bound IO (WS + history polls). */
-    private suspend fun cancelServerBoundIo() {
-        wsJob?.cancelAndJoin()
-        wsJob = null
-        val pollSnapshot = pollJobs.toList()
-        pollJobs.clear()
-        pollSnapshot.forEach { runCatching { it.cancelAndJoin() } }
+    /**
+     * Emit the user-facing `NO_ACTIVE_SERVER` error AND dispatch a
+     * `ConnectAttempt(NO_ACTIVE_SERVER)` so the reducer transitions
+     * to `Lost(NO_ACTIVE_SERVER)` (per @Lily PR #19 review blocker 3
+     * comment `4413957569`).
+     */
+    private fun dispatchNoActiveServer() {
+        errorFlow.tryEmit(ConnectError.NO_ACTIVE_SERVER)
+        producedChannel.trySend(
+            ConnectionInput.ConnectAttempt(classified = ConnectError.NO_ACTIVE_SERVER),
+        )
     }
 
     private fun openWs(server: ServerInfo, clientId: String) {
@@ -243,6 +269,14 @@ class ConnectionEffectRunner(
                     entry.status?.completed == true -> HistoryProbeResult.Completed
                     else -> HistoryProbeResult.Running
                 }
+            } catch (ce: CancellationException) {
+                // Per @Lily PR #19 review blocker 4 (`4413957569`):
+                // structured-concurrency cancellation must propagate.
+                // A switch- or shutdown-driven cancel is NOT a
+                // probe failure — emitting `Error(UNKNOWN)` here would
+                // leak a stale `HistoryProbe` for a server we no
+                // longer care about.
+                throw ce
             } catch (httpEx: ComfyHttpException) {
                 val classifiedError = when (httpEx) {
                     is ComfyHttpException.HttpStatus -> when (httpEx.statusCode) {

@@ -254,4 +254,37 @@ class ConnectionStateMachineTest {
         assertEquals(ConnectError.NOT_COMFYUI, lost.error)
         machine.stop()
     }
+
+    @Test fun ws_drop_with_no_active_server_lands_in_Lost_NO_ACTIVE_SERVER() = runTest {
+        // Per @Lily PR #19 review (`4413957569`) blocker 3:
+        // NO_ACTIVE_SERVER must drive the state to Lost(NO_ACTIVE_SERVER)
+        // — emitting on the runner's `errors` flow alone leaves the
+        // state machine stuck in Reconnecting with no UI panel.
+        //
+        // Path: WS drop in Connected → Reconnecting + OpenWs side effect.
+        // Runner sees null active server, dispatches
+        // ConnectAttempt(NO_ACTIVE_SERVER). Reducer transitions to
+        // Lost(NO_ACTIVE_SERVER).
+        val ws = FakeWs()
+        val activeServer = ActiveServerHolder() // empty — current.value == null
+        val runner = ConnectionEffectRunner(
+            activeServer = activeServer,
+            httpClientFactory = { _ -> http() },
+            webSocketSourceFactory = { _ -> ws },
+            scope = this,
+        )
+        val reducer = ConnectionStateReducer(clientIdProvider = { "client-uuid" })
+        val machine = ConnectionStateMachine(reducer, runner, this)
+        machine.start()
+        runCurrent()
+
+        // Drop WS → Reconnecting + OpenWs. Runner sees null active
+        // server → ConnectAttempt(NO_ACTIVE_SERVER) → Lost(...).
+        machine.dispatch(ConnectionInput.Ws(droppedReason = WsDropReason.LAN_FLAKE))
+        runCurrent()
+
+        val lost = assertIs<ConnectionState.Lost>(machine.currentState.value)
+        assertEquals(ConnectError.NO_ACTIVE_SERVER, lost.error)
+        machine.stop()
+    }
 }

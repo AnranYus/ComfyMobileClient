@@ -8,6 +8,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.fillMaxSize
+import com.comfymobile.data.connect.ActiveServerHolder
 import com.comfymobile.data.connect.ConnectAttemptCoordinator
 import com.comfymobile.data.connection.ConnectionStateMachineFacade
 import com.comfymobile.domain.server.ServerHistoryStore
@@ -52,17 +53,19 @@ fun App() {
             // Singletons resolved once per composition root.
             val machine = remember { koin.get<ConnectionStateMachineFacade>() }
             val historyStore = remember { koin.get<ServerHistoryStore>() }
+            val activeServer = remember { koin.get<ActiveServerHolder>() }
 
             // VM-scoped collaborators — keyed on `scope` so that if
             // the composition is recreated with a fresh scope (e.g.
             // process death restoration) the VM and Coordinator
             // rebuild together.
             val scope = rememberCoroutineScope()
-            val viewModel = remember(scope, machine, historyStore) {
+            val viewModel = remember(scope, machine, historyStore, activeServer) {
                 ConnectViewModel(
                     machine = machine,
                     historyStore = historyStore,
                     scope = scope,
+                    activeServer = activeServer,
                 )
             }
             val coordinator = remember(scope, viewModel) {
