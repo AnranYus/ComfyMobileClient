@@ -51,7 +51,7 @@ class ConnectViewModelTest {
 
         viewModel.onRetry()
 
-        assertEquals(listOf(ConnectionInput.Retry), machine.dispatchedInputs)
+        assertEquals(listOf<ConnectionInput>(ConnectionInput.Retry), machine.dispatchedInputs)
     }
 
     @Test fun selecting_history_entry_emits_connect_request() = runTest {
