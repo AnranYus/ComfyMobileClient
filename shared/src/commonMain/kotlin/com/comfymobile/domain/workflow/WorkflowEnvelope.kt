@@ -6,15 +6,25 @@ import kotlinx.serialization.json.JsonElement
 /**
  * One imported workflow as the mobile client tracks it.
  *
- * Per ADR-0003: the [original] JSON is preserved verbatim — we never
- * reshape or strip fields the client doesn't recognise. Edits land on
- * a derived representation; on submit we rebuild the API-format
- * payload from the latest derived state and synthesise a UI snapshot
- * that matches it (for `extra_pnginfo.workflow`).
+ * Per ADR-0003 / CONTEXT v4: the [original] JSON is **structure-
+ * lossless** — every node, parameter, link, group, and unknown
+ * field present in the imported document survives in [original],
+ * and round-tripping through it does not lose any field the client
+ * didn't understand. The serialised byte sequence may differ
+ * (whitespace, key ordering, escape style — kotlinx-serialization
+ * normalises these), but the parsed JSON tree is equivalent.
+ *
+ * Edits land on a derived representation; on submit we rebuild the
+ * API-format payload from the latest derived state and synthesise a
+ * UI snapshot that matches it (for `extra_pnginfo.workflow`).
  */
 @Serializable
 data class WorkflowEnvelope(
-    /** Bytes-equivalent JSON the user originally imported. */
+    /**
+     * Parsed JSON tree of the imported document, preserved
+     * structure-lossless. Unknown fields, unknown node types and any
+     * future ComfyUI extensions stay intact.
+     */
     val original: JsonElement,
     /** Whether [original] is in UI format or API format. */
     val format: WorkflowFormat,

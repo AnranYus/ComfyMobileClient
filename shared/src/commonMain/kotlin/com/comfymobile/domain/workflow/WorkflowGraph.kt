@@ -18,9 +18,12 @@ import kotlinx.serialization.json.JsonObject
 sealed interface WorkflowGraph {
 
     /**
-     * Verbatim UI format. Stored as `JsonObject` rather than a
-     * strongly typed model so unknown fields (custom node types,
-     * future ComfyUI extensions) round-trip safely.
+     * UI format kept as a parsed `JsonObject` rather than a strongly
+     * typed model so unknown fields (custom node types, future
+     * ComfyUI extensions) round-trip **structure-losslessly** —
+     * every key/value the import had is present in [raw], even if
+     * the byte-sequence after re-serialisation differs (whitespace,
+     * key ordering).
      */
     @Serializable
     @SerialName("ui")
