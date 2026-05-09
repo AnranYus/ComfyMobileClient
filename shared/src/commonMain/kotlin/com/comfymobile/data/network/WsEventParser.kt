@@ -67,6 +67,11 @@ object WsEventParser {
 
     private fun parseStatus(data: JsonElement): WsEvent {
         val obj = data.objectOrNull() ?: return WsEvent.Unknown("status", data)
+        // `status` frames are also used as plain heartbeats — some
+        // ComfyUI builds send them without an exec_info block during
+        // idle. Default to 0 in that case rather than throwing; UX
+        // shows "queue: 0" which is the correct semantic. Tested by
+        // [WsEventParserTest.status_missing_queue_remaining_defaults_to_0].
         val queueRemaining = obj["status"]?.objectOrNull()
             ?.get("exec_info")?.objectOrNull()
             ?.get("queue_remaining")?.intOrNullSafe()

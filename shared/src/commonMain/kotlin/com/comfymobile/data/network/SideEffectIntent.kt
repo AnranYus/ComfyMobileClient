@@ -14,8 +14,22 @@ sealed interface SideEffectIntent {
     /** Open a WS connection with the given persisted client id. */
     data class OpenWs(val clientId: String) : SideEffectIntent
 
-    /** Poll `/history/{prompt_id}` to recover offline state. */
+    /**
+     * Poll `/history/{prompt_id}` for one specific prompt to recover
+     * its terminal state. Use this when the runtime knows exactly
+     * which prompt to ask about (e.g. a foreground-resume probe).
+     */
     data class PollHistory(val promptId: String) : SideEffectIntent
+
+    /**
+     * Poll `/history/{prompt_id}` for **every** prompt the runtime
+     * believes is currently in flight. The reducer doesn't hold the
+     * in-flight prompt set itself — that's the runtime's
+     * responsibility — so this intent just signals "fan out a poll
+     * per active prompt now". Issued when the 5s reconnect-fallback
+     * timer fires.
+     */
+    data object PollActiveHistory : SideEffectIntent
 
     /** Schedule a timer tick after [millis]; fires as
      *  [ConnectionInput.Timer] with the matching tick id. */

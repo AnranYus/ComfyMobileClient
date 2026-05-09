@@ -37,6 +37,22 @@ class WsEventParserTest {
         assertNull(event.sid)
     }
 
+    @Test fun status_missing_queue_remaining_defaults_to_0() {
+        // Some ComfyUI builds emit `status` as a heartbeat without
+        // an `exec_info` block. Treating that as queue=0 is the
+        // intentional fallback (see WsEventParser.parseStatus).
+        val event = WsEventParser.parse("""{"type":"status","data":{}}""")
+        val status = assertIs<WsEvent.Status>(event)
+        assertEquals(0, status.queueRemaining)
+        assertNull(status.sid)
+    }
+
+    @Test fun status_with_status_block_but_missing_exec_info_defaults_to_0() {
+        val event = WsEventParser.parse("""{"type":"status","data":{"status":{}}}""")
+        val status = assertIs<WsEvent.Status>(event)
+        assertEquals(0, status.queueRemaining)
+    }
+
     @Test fun feature_flags_keeps_payload_verbatim() {
         val event = WsEventParser.parse(
             """{"type":"feature_flags","data":{"supports_preview_metadata":true,"version":3}}"""

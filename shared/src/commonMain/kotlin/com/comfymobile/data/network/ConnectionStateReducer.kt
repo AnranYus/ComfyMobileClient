@@ -62,7 +62,16 @@ class ConnectionStateReducer(
             is ConnectionInput.Network -> ConnectionTransition(ConnectionState.Connected)
             is ConnectionInput.HistoryProbe -> ConnectionTransition(ConnectionState.Connected)
             is ConnectionInput.Timer -> ConnectionTransition(ConnectionState.Connected)
-            is ConnectionInput.ConnectAttempt -> ConnectionTransition(ConnectionState.Connected)
+            is ConnectionInput.ConnectAttempt -> {
+                // A failed connect attempt while we believe we're
+                // connected means the runtime saw a hard rejection
+                // (e.g. /system_stats returned 404 on a probe). Pin
+                // the classified error so UI can surface it.
+                ConnectionTransition(
+                    next = ConnectionState.Lost(input.classified),
+                    sideEffects = listOf(SideEffectIntent.EmitError(input.classified)),
+                )
+            }
             ConnectionInput.Retry -> ConnectionTransition(ConnectionState.Connected)
         }
 
@@ -100,18 +109,15 @@ class ConnectionStateReducer(
         }
         is ConnectionInput.Timer -> when (input.tick) {
             TimerTick.ReconnectFallbackPoll -> {
-                // 5s elapsed without WS recovery → start polling
-                // /history for any in-flight prompt id. The reducer
-                // does not know which prompts are in flight; the
-                // runtime layer holds that map and emits one
-                // PollHistory side-effect per id when it sees this
-                // intent. We schedule the give-up timer if not
-                // already set.
+                // 5s elapsed without WS recovery. Tell the runtime to
+                // poll /history for every prompt it knows is in
+                // flight — the reducer doesn't hold that set, so it
+                // signals the fan-out intent rather than naming a
+                // specific prompt. Use PollActiveHistory (no string
+                // sentinels).
                 ConnectionTransition(
                     next = state,
-                    sideEffects = listOf(
-                        SideEffectIntent.PollHistory(promptId = "*"),
-                    ),
+                    sideEffects = listOf(SideEffectIntent.PollActiveHistory),
                 )
             }
             TimerTick.ReconnectGiveUp -> {
@@ -168,7 +174,21 @@ class ConnectionStateReducer(
             next = state,
             sideEffects = listOf(SideEffectIntent.OpenWs(clientId = clientIdProvider())),
         )
-        is ConnectionInput.ConnectAttempt -> ConnectionTransition(state)
+        is ConnectionInput.ConnectAttempt -> {
+            // A reconnect attempt completed with an error. Stop the
+            // retry timers and pin the classified error so UI shows
+            // the right copy instead of the generic UNKNOWN we'd get
+            // from waiting for the give-up timer. User can press
+            // Retry to re-enter Reconnecting.
+            ConnectionTransition(
+                next = ConnectionState.Lost(input.classified),
+                sideEffects = listOf(
+                    SideEffectIntent.CancelTimer(TimerTick.ReconnectFallbackPoll),
+                    SideEffectIntent.CancelTimer(TimerTick.ReconnectGiveUp),
+                    SideEffectIntent.EmitError(input.classified),
+                ),
+            )
+        }
     }
 
     // ----------------------------------------------------------------- Lost
@@ -183,6 +203,19 @@ class ConnectionStateReducer(
             enterReconnecting(ReconnectReason.LAN_FLAKE)
         } else {
             ConnectionTransition(state)
+        }
+        is ConnectionInput.ConnectAttempt -> {
+            // A retry attempt failed again — refresh the classified
+            // error so UI can show the latest reason (the user might
+            // have changed networks between attempts).
+            if (input.classified != state.error) {
+                ConnectionTransition(
+                    next = ConnectionState.Lost(input.classified),
+                    sideEffects = listOf(SideEffectIntent.EmitError(input.classified)),
+                )
+            } else {
+                ConnectionTransition(state)
+            }
         }
         else -> ConnectionTransition(state)
     }

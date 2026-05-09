@@ -72,17 +72,22 @@ class ConnectionStateReducerTest {
         )
     }
 
-    @Test fun fallback_poll_timer_emits_PollHistory_intent() {
+    @Test fun fallback_poll_timer_emits_PollActiveHistory_intent() {
         val state = ConnectionState.Reconnecting(ReconnectReason.LAN_FLAKE)
         val transition = reducer.reduce(
             state,
             ConnectionInput.Timer(TimerTick.ReconnectFallbackPoll),
         )
-        // Stays in Reconnecting; emits PollHistory side-effect.
+        // Stays in Reconnecting; emits PollActiveHistory fan-out
+        // intent (no string sentinels).
         assertEquals(state, transition.next)
         assertTrue(
-            transition.sideEffects.any { it is SideEffectIntent.PollHistory },
-            "Expected PollHistory intent, got ${transition.sideEffects}",
+            transition.sideEffects.any { it == SideEffectIntent.PollActiveHistory },
+            "Expected PollActiveHistory intent, got ${transition.sideEffects}",
+        )
+        // Should NOT emit a single-prompt PollHistory.
+        assertTrue(
+            transition.sideEffects.none { it is SideEffectIntent.PollHistory },
         )
     }
 
@@ -234,5 +239,67 @@ class ConnectionStateReducerTest {
     @Test fun progress_state_can_be_constructed_with_empty_nodes() {
         val event = WsEvent.ProgressState(promptId = "p", nodes = JsonObject(emptyMap()))
         assertEquals("p", event.promptId)
+    }
+
+    // ----------------------------------------------------------------- ConnectAttempt
+
+    @Test fun connect_attempt_failure_in_reconnecting_pins_classified_error_and_cancels_timers() {
+        val state = ConnectionState.Reconnecting(ReconnectReason.LAN_FLAKE)
+        val transition = reducer.reduce(
+            state,
+            ConnectionInput.ConnectAttempt(classified = ConnectError.NOT_COMFYUI),
+        )
+        val next = assertIs<ConnectionState.Lost>(transition.next)
+        assertEquals(ConnectError.NOT_COMFYUI, next.error)
+        // Timers cancelled, error emitted.
+        val tickIds = transition.sideEffects
+            .filterIsInstance<SideEffectIntent.CancelTimer>()
+            .map { it.tick }
+            .toSet()
+        assertEquals(setOf(TimerTick.ReconnectFallbackPoll, TimerTick.ReconnectGiveUp), tickIds)
+        assertTrue(
+            transition.sideEffects.any {
+                it is SideEffectIntent.EmitError && it.error == ConnectError.NOT_COMFYUI
+            }
+        )
+    }
+
+    @Test fun connect_attempt_failure_in_connected_transitions_to_lost() {
+        val transition = reducer.reduce(
+            ConnectionState.Connected,
+            ConnectionInput.ConnectAttempt(classified = ConnectError.WRONG_PORT_404),
+        )
+        val next = assertIs<ConnectionState.Lost>(transition.next)
+        assertEquals(ConnectError.WRONG_PORT_404, next.error)
+        assertTrue(
+            transition.sideEffects.any {
+                it is SideEffectIntent.EmitError && it.error == ConnectError.WRONG_PORT_404
+            }
+        )
+    }
+
+    @Test fun connect_attempt_in_lost_refreshes_error_when_changed() {
+        val state = ConnectionState.Lost(ConnectError.TIMEOUT)
+        val transition = reducer.reduce(
+            state,
+            ConnectionInput.ConnectAttempt(classified = ConnectError.TLS_HANDSHAKE),
+        )
+        val next = assertIs<ConnectionState.Lost>(transition.next)
+        assertEquals(ConnectError.TLS_HANDSHAKE, next.error)
+        assertTrue(
+            transition.sideEffects.any {
+                it is SideEffectIntent.EmitError && it.error == ConnectError.TLS_HANDSHAKE
+            }
+        )
+    }
+
+    @Test fun connect_attempt_in_lost_with_same_error_is_no_op() {
+        val state = ConnectionState.Lost(ConnectError.TIMEOUT)
+        val transition = reducer.reduce(
+            state,
+            ConnectionInput.ConnectAttempt(classified = ConnectError.TIMEOUT),
+        )
+        assertEquals(state, transition.next)
+        assertTrue(transition.sideEffects.isEmpty())
     }
 }
