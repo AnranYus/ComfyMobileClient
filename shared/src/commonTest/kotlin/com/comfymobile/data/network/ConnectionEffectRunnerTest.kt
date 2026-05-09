@@ -10,11 +10,13 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
 import io.ktor.serialization.kotlinx.json.json
 import io.ktor.utils.io.ByteReadChannel
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.TestScope
@@ -67,19 +69,28 @@ class ConnectionEffectRunnerTest {
 
     /**
      * In-memory [WebSocketSource] used by tests. `connect()` returns
-     * a Flow that drains [frames] (a SharedFlow tests push events
-     * into); when [throwOnConnect] is non-null, the Flow throws to
-     * simulate a WS drop.
+     * a Flow draining [frames]; when [throwOnConnect] is non-null,
+     * the Flow throws to simulate a WS drop.
+     *
+     * Backed by a buffered [Channel] (instead of a `MutableSharedFlow`)
+     * so frames pushed *before* the runner subscribes are NOT
+     * dropped — they are buffered until the runner's
+     * `connect().collect` starts draining. This matches a real WS
+     * session where each frame is delivered exactly once.
      */
     private class FakeWs : WebSocketSource {
-        val frames = MutableSharedFlow<WsEvent>(replay = 0, extraBufferCapacity = 64)
+        val frames = Channel<WsEvent>(capacity = 64)
         var throwOnConnect: Throwable? = null
         var lastClientId: String? = null
+
+        suspend fun pushFrame(event: WsEvent) {
+            frames.send(event)
+        }
 
         override fun connect(clientId: String): Flow<WsEvent> {
             lastClientId = clientId
             val err = throwOnConnect
-            return if (err != null) flow { throw err } else frames
+            return if (err != null) flow { throw err } else frames.receiveAsFlow()
         }
     }
 
@@ -241,8 +252,10 @@ class ConnectionEffectRunnerTest {
         advanceUntilIdle()
         val ev1 = WsEvent.ExecutionStart(promptId = "p-1")
         val ev2 = WsEvent.Progress(promptId = "p-1", node = "3", value = 5, max = 20)
-        ws.frames.emit(ev1)
-        ws.frames.emit(ev2)
+        // Channel-backed pushFrame buffers if the runner has not yet
+        // subscribed; no risk of frame loss.
+        ws.pushFrame(ev1)
+        ws.pushFrame(ev2)
         advanceUntilIdle()
         val collected = collector.await()
         assertEquals(2, collected.size)
@@ -271,6 +284,6 @@ class ConnectionEffectRunnerTest {
         assertEquals(null, drop.event)
     }
 
-    private fun makeRunner(scope: kotlinx.coroutines.CoroutineScope): ConnectionEffectRunner =
+    private fun makeRunner(scope: CoroutineScope): ConnectionEffectRunner =
         ConnectionEffectRunner(http = http(), ws = FakeWs(), scope = scope)
 }
