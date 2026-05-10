@@ -38,6 +38,26 @@ class WorkflowImporterTest {
         assertEquals(success.row, repository.listRecents().single())
     }
 
+    @Test fun prepare_json_ui_workflow_does_not_persist_until_commit() = runTest {
+        val repository = InMemoryWorkflowRepository()
+        val importer = importer(repository = repository, registry = registry())
+
+        val prepared = importer.prepareJsonText(
+            text = uiWorkflowJson("KSampler"),
+            source = WorkflowImportSource.File,
+            sourceName = "preview.json",
+        )
+
+        val ready = assertIs<WorkflowImportPreparationOutcome.Ready>(prepared)
+        assertEquals("preview", ready.draft.defaultDisplayName)
+        assertEquals(emptyList(), repository.listRecents())
+
+        val committed = importer.commit(ready.draft, displayName = "Edited name")
+
+        assertEquals("Edited name", committed.row.displayName)
+        assertEquals(committed.row, repository.listRecents().single())
+    }
+
     @Test fun import_png_prefers_workflow_chunk_over_prompt_chunk() = runTest {
         val repository = InMemoryWorkflowRepository()
         val importer = importer(repository = repository)

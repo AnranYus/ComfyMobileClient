@@ -32,37 +32,58 @@ class WorkflowImporter(
         text: String,
         source: WorkflowImportSource,
         sourceName: String? = null,
-    ): WorkflowImportOutcome =
-        parseJsonObject(text)?.let { parsed ->
-            persist(
-                original = parsed,
-                format = detectFormat(parsed) ?: return WorkflowImportOutcome.Failure(
-                    WorkflowImportError.UnsupportedJsonShape,
-                ),
-                source = source,
-                sourceName = sourceName,
-                sizeBytes = text.encodeToByteArray().size,
+    ): WorkflowImportOutcome = when (val prepared = prepareJsonText(text, source, sourceName)) {
+        is WorkflowImportPreparationOutcome.Ready -> commit(prepared.draft)
+        is WorkflowImportPreparationOutcome.Failure -> WorkflowImportOutcome.Failure(prepared.error)
+    }
+
+    suspend fun prepareJsonText(
+        text: String,
+        source: WorkflowImportSource,
+        sourceName: String? = null,
+    ): WorkflowImportPreparationOutcome {
+        val parsed = parseJsonObject(text)
+            ?: return WorkflowImportPreparationOutcome.Failure(
+                WorkflowImportError.InvalidJson(keyword = null),
             )
-        } ?: WorkflowImportOutcome.Failure(
-            WorkflowImportError.InvalidJson(keyword = null),
+        val format = detectFormat(parsed)
+            ?: return WorkflowImportPreparationOutcome.Failure(
+                WorkflowImportError.UnsupportedJsonShape,
+            )
+        return prepare(
+            original = parsed,
+            format = format,
+            source = source,
+            sourceName = sourceName,
+            sizeBytes = text.encodeToByteArray().size,
         )
+    }
 
     suspend fun importPngBytes(
         bytes: ByteArray,
         source: WorkflowImportSource,
         sourceName: String? = null,
-    ): WorkflowImportOutcome {
+    ): WorkflowImportOutcome = when (val prepared = preparePngBytes(bytes, source, sourceName)) {
+        is WorkflowImportPreparationOutcome.Ready -> commit(prepared.draft)
+        is WorkflowImportPreparationOutcome.Failure -> WorkflowImportOutcome.Failure(prepared.error)
+    }
+
+    suspend fun preparePngBytes(
+        bytes: ByteArray,
+        source: WorkflowImportSource,
+        sourceName: String? = null,
+    ): WorkflowImportPreparationOutcome {
         val workflowText = try {
             PngTextChunkCodec.extract(bytes, ComfyPngWorkflow.KEYWORD_WORKFLOW)
         } catch (e: PngFormatException) {
-            return WorkflowImportOutcome.Failure(WorkflowImportError.InvalidPng(e.message.orEmpty()))
+            return WorkflowImportPreparationOutcome.Failure(WorkflowImportError.InvalidPng(e.message.orEmpty()))
         }
 
         var workflowChunkWasInvalid = false
         if (workflowText != null) {
             val parsed = parseJsonObject(workflowText)
             if (parsed != null) {
-                return persist(
+                return prepare(
                     original = parsed,
                     format = WorkflowFormat.UI,
                     source = source,
@@ -76,8 +97,8 @@ class WorkflowImporter(
         val promptText = try {
             PngTextChunkCodec.extract(bytes, ComfyPngWorkflow.KEYWORD_PROMPT)
         } catch (e: PngFormatException) {
-            return WorkflowImportOutcome.Failure(WorkflowImportError.InvalidPng(e.message.orEmpty()))
-        } ?: return WorkflowImportOutcome.Failure(
+            return WorkflowImportPreparationOutcome.Failure(WorkflowImportError.InvalidPng(e.message.orEmpty()))
+        } ?: return WorkflowImportPreparationOutcome.Failure(
             if (workflowChunkWasInvalid) {
                 WorkflowImportError.InvalidJson(ComfyPngWorkflow.KEYWORD_WORKFLOW)
             } else {
@@ -86,10 +107,10 @@ class WorkflowImporter(
         )
 
         val parsed = parseJsonObject(promptText)
-            ?: return WorkflowImportOutcome.Failure(
+            ?: return WorkflowImportPreparationOutcome.Failure(
                 WorkflowImportError.InvalidJson(ComfyPngWorkflow.KEYWORD_PROMPT),
             )
-        return persist(
+        return prepare(
             original = parsed,
             format = WorkflowFormat.API,
             source = source,
@@ -98,16 +119,38 @@ class WorkflowImporter(
         )
     }
 
-    private suspend fun persist(
+    suspend fun commit(
+        draft: WorkflowImportDraft,
+        displayName: String = draft.defaultDisplayName,
+    ): WorkflowImportOutcome.Success {
+        val now = nowEpochMs()
+        val envelope = WorkflowEnvelope(
+            original = draft.original,
+            format = draft.format,
+            metadata = WorkflowMetadata(
+                label = displayName.trim().ifEmpty { draft.defaultDisplayName },
+                createdAtEpochMs = now,
+                lastEditedAtEpochMs = now,
+                source = draft.source.metadataSource,
+            ),
+        )
+        return WorkflowImportOutcome.Success(
+            row = repository.upsert(envelope),
+            nodeStats = draft.nodeStats,
+            warnings = draft.warnings,
+        )
+    }
+
+    private fun prepare(
         original: JsonObject,
         format: WorkflowFormat,
         source: WorkflowImportSource,
         sourceName: String?,
         sizeBytes: Int,
-    ): WorkflowImportOutcome {
+    ): WorkflowImportPreparationOutcome {
         val nodeStats = nodeStats(original, format)
         if (nodeStats.totalNodes == 0) {
-            return WorkflowImportOutcome.Failure(WorkflowImportError.EmptyWorkflow)
+            return WorkflowImportPreparationOutcome.Failure(WorkflowImportError.EmptyWorkflow)
         }
         val warnings = buildList {
             if (sizeBytes > largeFileThresholdBytes) {
@@ -122,21 +165,17 @@ class WorkflowImporter(
                 )
             }
         }
-        val now = nowEpochMs()
-        val envelope = WorkflowEnvelope(
-            original = original,
-            format = format,
-            metadata = WorkflowMetadata(
-                label = displayNameFor(sourceName),
-                createdAtEpochMs = now,
-                lastEditedAtEpochMs = now,
-                source = source.metadataSource,
-            ),
-        )
-        return WorkflowImportOutcome.Success(
-            row = repository.upsert(envelope),
-            warnings = warnings,
-            nodeStats = nodeStats,
+        return WorkflowImportPreparationOutcome.Ready(
+            WorkflowImportDraft(
+                original = original,
+                format = format,
+                source = source,
+                sourceName = sourceName,
+                defaultDisplayName = displayNameFor(sourceName),
+                sizeBytes = sizeBytes,
+                nodeStats = nodeStats,
+                warnings = warnings,
+            )
         )
     }
 
@@ -226,6 +265,22 @@ enum class WorkflowImportSource(val metadataSource: String) {
     PasteText("paste-text"),
     PasteImage("paste-image"),
 }
+
+sealed interface WorkflowImportPreparationOutcome {
+    data class Ready(val draft: WorkflowImportDraft) : WorkflowImportPreparationOutcome
+    data class Failure(val error: WorkflowImportError) : WorkflowImportPreparationOutcome
+}
+
+data class WorkflowImportDraft(
+    val original: JsonObject,
+    val format: WorkflowFormat,
+    val source: WorkflowImportSource,
+    val sourceName: String?,
+    val defaultDisplayName: String,
+    val sizeBytes: Int,
+    val nodeStats: WorkflowImportNodeStats,
+    val warnings: List<WorkflowImportWarning> = emptyList(),
+)
 
 sealed interface WorkflowImportOutcome {
     data class Success(
