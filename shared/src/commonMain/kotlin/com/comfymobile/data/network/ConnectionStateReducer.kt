@@ -72,7 +72,29 @@ class ConnectionStateReducer(
                     sideEffects = listOf(SideEffectIntent.EmitError(input.classified)),
                 )
             }
-            ConnectionInput.Retry -> ConnectionTransition(ConnectionState.Connected)
+            // Per @Lily PR #19 review (`4413996459`): a successful
+            // manual connect dispatches `Retry` after `setActive`. If
+            // the machine is already in `Connected` (e.g. initial
+            // state, or already connected to another server), we must
+            // still emit `OpenWs` so the runner actually opens the
+            // WebSocket for the now-active server. Without this side
+            // effect, the first manual connect from the initial
+            // Connected state shows "Connected" but never opens a WS
+            // session — and a manual switch A→B while Connected
+            // never tears down A's session.
+            //
+            // The state stays Connected (not transitioned through
+            // Reconnecting) because the connect-attempt coordinator
+            // has already verified `/system_stats` for the new
+            // server; we are effectively confirming "we're talking to
+            // this server now" rather than "we lost a server and
+            // need to reconnect."
+            ConnectionInput.Retry -> ConnectionTransition(
+                next = ConnectionState.Connected,
+                sideEffects = listOf(
+                    SideEffectIntent.OpenWs(clientId = clientIdProvider()),
+                ),
+            )
         }
 
     // ----------------------------------------------------------------- Reconnecting

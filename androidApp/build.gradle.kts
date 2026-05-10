@@ -41,6 +41,12 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
 
+    // ComfyMobileApplication.onCreate calls startKoin and resolves
+    // singletons by type, so the app target needs koin-core directly
+    // (the :shared module declares it as `implementation`, which does
+    // not transit to dependents in KMP).
+    implementation(libs.koin.core)
+
     // Compose BOM equivalents are pulled transitively via :shared (Compose Multiplatform);
     // we only add Android-specific entries here.
 }

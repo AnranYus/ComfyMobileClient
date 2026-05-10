@@ -529,7 +529,19 @@ fun ConnectErrorView(
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Button(onClick = onRetry) {
+            // Per @Lily PR #19 review `4413981846` blocker 2: route
+            // the primary button by `Lookup.primaryAction` so a
+            // "Choose / 去选择" CTA does NOT dispatch Retry (which
+            // would loop back to Lost(NO_ACTIVE_SERVER)). The
+            // routing lives in `ConnectErrorCopy.primaryClickHandler`
+            // so a unit test can lock the contract without a Compose
+            // UI harness.
+            val primaryClick = ConnectErrorCopy.primaryClickHandler(
+                primaryAction = copy.primaryAction,
+                onRetry = onRetry,
+                onDismiss = onDismiss,
+            )
+            Button(onClick = primaryClick) {
                 Text(LocalizedText(copy.primaryCtaZh, copy.primaryCtaEn).resolve(language))
             }
             OutlinedButton(onClick = onDismiss) {

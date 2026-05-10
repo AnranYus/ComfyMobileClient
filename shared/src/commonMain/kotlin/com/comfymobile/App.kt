@@ -1,24 +1,46 @@
 package com.comfymobile
 
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
-import androidx.compose.ui.Alignment
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.fillMaxSize
+import com.comfymobile.data.connect.ActiveServerHolder
+import com.comfymobile.data.connect.ConnectAttemptCoordinator
+import com.comfymobile.data.connection.ConnectionStateMachineFacade
+import com.comfymobile.domain.server.ServerHistoryStore
+import com.comfymobile.presentation.connection.ConnectRoute
+import com.comfymobile.presentation.connection.ConnectViewModel
+import org.koin.compose.getKoin
+import org.koin.core.parameter.parametersOf
 
 /**
  * Root Composable shared between Android and iOS.
  *
- * Phase 1.0 ships a Hello-screen showing the version + phase string.
- * Real product screens land in T1.4 onward.
+ * T1.4b part 3d-ii rewires this from the Phase 1.0 Hello-screen to
+ * the live connect flow:
+ *  - Resolves the singleton [ConnectionStateMachineFacade] +
+ *    [ServerHistoryStore] from Koin (started by the platform host —
+ *    `ComfyMobileApplication` on Android, `MainViewController` on
+ *    iOS).
+ *  - Creates a [ConnectViewModel] tied to a Compose-managed
+ *    [rememberCoroutineScope] so it cancels with the composition
+ *    leaving the tree (Activity destroy / SwiftUI scene removal).
+ *  - Pulls a fresh [ConnectAttemptCoordinator] from Koin parameterised
+ *    on the same VM + scope — mirrors how the AppModule factory was
+ *    designed in T1.4b part 3d-i.
+ *  - Calls `coordinator.start()` / `coordinator.stop()` from a
+ *    `DisposableEffect` so the connect-event observer is alive
+ *    exactly while the screen is on the tree.
+ *
+ * Process-level lifecycle (state machine + bootstrap start/stop) is
+ * the platform host's job, not this composable's. Per @Lily PR #18
+ * thread (`62385887`): rotation must NOT cancel the state machine,
+ * so `ConnectionStateMachine.start` happens in `Application.onCreate`
+ * (Android) or app boot (iOS), never in this Composable.
  */
 @Composable
 fun App() {
@@ -27,23 +49,36 @@ fun App() {
             modifier = Modifier.fillMaxSize(),
             color = MaterialTheme.colorScheme.background,
         ) {
-            val greeting = remember { Greeting() }
-            Box(
-                modifier = Modifier.fillMaxSize().padding(24.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = "ComfyMobileClient",
-                        style = MaterialTheme.typography.headlineMedium,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Text(
-                        text = greeting.greet(),
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
+            val koin = getKoin()
+            // Singletons resolved once per composition root.
+            val machine = remember { koin.get<ConnectionStateMachineFacade>() }
+            val historyStore = remember { koin.get<ServerHistoryStore>() }
+            val activeServer = remember { koin.get<ActiveServerHolder>() }
+
+            // VM-scoped collaborators — keyed on `scope` so that if
+            // the composition is recreated with a fresh scope (e.g.
+            // process death restoration) the VM and Coordinator
+            // rebuild together.
+            val scope = rememberCoroutineScope()
+            val viewModel = remember(scope, machine, historyStore, activeServer) {
+                ConnectViewModel(
+                    machine = machine,
+                    historyStore = historyStore,
+                    scope = scope,
+                    activeServer = activeServer,
+                )
+            }
+            val coordinator = remember(scope, viewModel) {
+                koin.get<ConnectAttemptCoordinator> {
+                    parametersOf(viewModel, scope)
                 }
             }
+            DisposableEffect(coordinator) {
+                coordinator.start()
+                onDispose { coordinator.stop() }
+            }
+
+            ConnectRoute(viewModel = viewModel)
         }
     }
 }

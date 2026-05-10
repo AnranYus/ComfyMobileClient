@@ -1,5 +1,7 @@
 package com.comfymobile.data.network
 
+import com.comfymobile.data.connect.ActiveServerHolder
+import com.comfymobile.domain.server.ServerInfo
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
@@ -13,8 +15,12 @@ import io.ktor.utils.io.ByteReadChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelChildren
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.take
@@ -23,9 +29,11 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.test.assertIs
 
@@ -151,10 +159,9 @@ class ConnectionEffectRunnerTest {
     }
 
     @Test fun poll_history_with_running_status_emits_Running_result() = runTest {
-        val runner = ConnectionEffectRunner(
-            http = http(historyResponse = """{"p-1":{"status":{"status_str":"running","completed":false}}}"""),
-            ws = FakeWs(),
+        val runner = makeRunner(
             scope = this,
+            http = http(historyResponse = """{"p-1":{"status":{"status_str":"running","completed":false}}}"""),
         )
         val collector = async { runner.producedInputs.take(1).toList() }
         advanceUntilIdle()
@@ -241,11 +248,7 @@ class ConnectionEffectRunnerTest {
 
     @Test fun open_ws_forwards_each_frame_as_Ws_input() = runTest {
         val ws = FakeWs()
-        val runner = ConnectionEffectRunner(
-            http = http(),
-            ws = ws,
-            scope = this,
-        )
+        val runner = makeRunner(scope = this, ws = ws)
         try {
             val collector = async { runner.producedInputs.take(2).toList() }
             advanceUntilIdle()
@@ -278,11 +281,7 @@ class ConnectionEffectRunnerTest {
 
     @Test fun open_ws_emits_Ws_drop_LAN_FLAKE_when_session_throws() = runTest {
         val ws = FakeWs().apply { throwOnConnect = RuntimeException("connection reset") }
-        val runner = ConnectionEffectRunner(
-            http = http(),
-            ws = ws,
-            scope = this,
-        )
+        val runner = makeRunner(scope = this, ws = ws)
         try {
             val collector = async { runner.producedInputs.take(1).toList() }
             advanceUntilIdle()
@@ -299,6 +298,345 @@ class ConnectionEffectRunnerTest {
         }
     }
 
-    private fun makeRunner(scope: CoroutineScope): ConnectionEffectRunner =
-        ConnectionEffectRunner(http = http(), ws = FakeWs(), scope = scope)
+    private fun makeRunner(
+        scope: CoroutineScope,
+        http: ComfyHttpClient = http(),
+        ws: WebSocketSource = FakeWs(),
+        activeServer: ActiveServerHolder = activeServerWith(SERVER_A),
+    ): ConnectionEffectRunner = ConnectionEffectRunner(
+        activeServer = activeServer,
+        httpClientFactory = { _ -> http },
+        webSocketSourceFactory = { _ -> ws },
+        scope = scope,
+    )
+
+    private fun activeServerWith(server: ServerInfo): ActiveServerHolder =
+        ActiveServerHolder().also { it.setActive(server) }
+
+    // ---------------------------------------------------------------- active-server gating
+    //
+    // Per @Lily PR #18 thread (`60a7e64a`): the runner must NOT route
+    // server-bound side effects to a default URL or the previously-
+    // active server when no active server is selected. Instead it
+    // emits ConnectError.NO_ACTIVE_SERVER on `emittedErrors` and
+    // performs zero IO. UI maps this to @Ores's "Pick a server"
+    // copy (PR #18 thread `b522a9f3`).
+
+    @Test fun open_ws_with_no_active_server_emits_NO_ACTIVE_SERVER_and_does_no_IO() = runTest {
+        val ws = FakeWs()
+        val http = http()
+        val noServer = ActiveServerHolder() // current.value == null
+        val runner = makeRunner(scope = this, http = http, ws = ws, activeServer = noServer)
+        try {
+            val errorCollector = async { runner.emittedErrors.take(1).toList() }
+            // Per @Lily PR #19 review (`4413957569`) blocker 3: the
+            // null-active-server path must ALSO produce a
+            // ConnectAttempt input so the reducer transitions to
+            // Lost(NO_ACTIVE_SERVER); emitting on `errors` alone is
+            // not enough.
+            val inputCollector = async { runner.producedInputs.take(1).toList() }
+            advanceUntilIdle()
+            runner.run(SideEffectIntent.OpenWs(clientId = "client-uuid-A"))
+            val errors = errorCollector.await()
+            val inputs = inputCollector.await()
+            assertEquals(listOf(ConnectError.NO_ACTIVE_SERVER), errors)
+            val attempt = assertIs<ConnectionInput.ConnectAttempt>(inputs.single())
+            assertEquals(ConnectError.NO_ACTIVE_SERVER, attempt.classified)
+            // No WS connect was attempted: FakeWs.lastClientId stays null.
+            assertEquals(null, ws.lastClientId)
+        } finally {
+            runner.shutdown()
+            ws.frames.close()
+            coroutineContext.cancelChildren()
+        }
+    }
+
+    @Test fun poll_history_with_no_active_server_emits_NO_ACTIVE_SERVER_and_does_no_IO() = runTest {
+        val noServer = ActiveServerHolder()
+        val runner = makeRunner(scope = this, activeServer = noServer)
+        try {
+            val errorCollector = async { runner.emittedErrors.take(1).toList() }
+            advanceUntilIdle()
+            runner.run(SideEffectIntent.PollHistory(promptId = "p-1"))
+            val errors = errorCollector.await()
+            assertEquals(listOf(ConnectError.NO_ACTIVE_SERVER), errors)
+        } finally {
+            runner.shutdown()
+            coroutineContext.cancelChildren()
+        }
+    }
+
+    @Test fun poll_active_history_with_no_active_server_emits_NO_ACTIVE_SERVER() = runTest {
+        val noServer = ActiveServerHolder()
+        val runner = makeRunner(scope = this, activeServer = noServer)
+        runner.trackInFlight("p-1")
+        runner.trackInFlight("p-2")
+        try {
+            val errorCollector = async { runner.emittedErrors.take(1).toList() }
+            advanceUntilIdle()
+            runner.run(SideEffectIntent.PollActiveHistory)
+            val errors = errorCollector.await()
+            assertEquals(listOf(ConnectError.NO_ACTIVE_SERVER), errors)
+        } finally {
+            runner.shutdown()
+            coroutineContext.cancelChildren()
+        }
+    }
+
+    @Test fun timer_intents_run_unconditionally_even_without_active_server() = runTest {
+        // Timers are reconnect-protocol cadence, NOT server-bound IO,
+        // so they must continue to fire even before an active server
+        // is selected. Otherwise the state machine could be wedged in
+        // Reconnecting waiting for a give-up timer that never arrives.
+        val noServer = ActiveServerHolder()
+        val runner = makeRunner(scope = this, activeServer = noServer)
+        val collector = async { runner.producedInputs.take(1).toList() }
+        advanceUntilIdle()
+        runner.run(SideEffectIntent.ScheduleTimer(TimerTick.ReconnectFallbackPoll, millis = 100))
+        advanceTimeBy(150)
+        val collected = collector.await()
+        assertEquals(1, collected.size)
+        assertIs<ConnectionInput.Timer>(collected[0])
+    }
+
+    @Test fun setting_active_server_after_no_active_server_allows_subsequent_open_ws() = runTest {
+        val ws = FakeWs()
+        val activeServer = ActiveServerHolder() // null at first
+        val runner = makeRunner(scope = this, ws = ws, activeServer = activeServer)
+        try {
+            // First attempt: no active server → NO_ACTIVE_SERVER, no IO.
+            val errorCollector = async { runner.emittedErrors.take(1).toList() }
+            advanceUntilIdle()
+            runner.run(SideEffectIntent.OpenWs(clientId = "early"))
+            val firstErrors = errorCollector.await()
+            assertEquals(listOf(ConnectError.NO_ACTIVE_SERVER), firstErrors)
+            assertEquals(null, ws.lastClientId)
+
+            // Now set active server. Subsequent OpenWs should connect.
+            activeServer.setActive(SERVER_A)
+            advanceUntilIdle()
+
+            val frameCollector = async { runner.producedInputs.take(1).toList() }
+            advanceUntilIdle()
+            runner.run(SideEffectIntent.OpenWs(clientId = "client-after-set"))
+            advanceUntilIdle()
+            ws.pushFrame(WsEvent.Status(queueRemaining = 0))
+            advanceUntilIdle()
+            val frames = frameCollector.await()
+            assertEquals(1, frames.size)
+            assertEquals("client-after-set", ws.lastClientId)
+        } finally {
+            runner.shutdown()
+            ws.frames.close()
+            coroutineContext.cancelChildren()
+        }
+    }
+
+    // ---------------------------------------------------------------- active-server change
+    //
+    // Per @Lily PR #18 thread (`60a7e64a`): when the user switches
+    // server, the runner must cancel in-flight server-bound IO so a
+    // half-open WS or pending poll never resolves against the old
+    // baseUrl, and subsequent intents target the NEW server.
+
+    @Test fun switching_active_server_cancels_in_flight_ws_without_idle_gap() = runTest {
+        // Per @Lily PR #19 review (`4413957569`) blocker 4: the prior
+        // version of this test had `advanceUntilIdle()` between
+        // setActive(B) and run(OpenWs) which masked the observer-vs-
+        // launch race. With the synchronous-sync fix (no async
+        // observer), `setActive(B)` followed IMMEDIATELY by
+        // `run(OpenWs)` must connect against B and must NOT cancel
+        // B's freshly-launched job.
+        val wsA = FakeWs()
+        val wsB = FakeWs()
+        val activeServer = activeServerWith(SERVER_A)
+        val runner = ConnectionEffectRunner(
+            activeServer = activeServer,
+            httpClientFactory = { _ -> http() },
+            webSocketSourceFactory = { server ->
+                when (server.serverId) {
+                    SERVER_A.serverId -> wsA
+                    SERVER_B.serverId -> wsB
+                    else -> error("unexpected server $server")
+                }
+            },
+            scope = this,
+        )
+        try {
+            // Open WS against A.
+            runner.run(SideEffectIntent.OpenWs(clientId = "client-A"))
+            advanceUntilIdle()
+            assertEquals("client-A", wsA.lastClientId)
+
+            // Switch to B and IMMEDIATELY launch OpenWs(B). NO
+            // advanceUntilIdle() between setActive and run — that's
+            // the regression Lily flagged.
+            activeServer.setActive(SERVER_B)
+            runner.run(SideEffectIntent.OpenWs(clientId = "client-B"))
+            advanceUntilIdle()
+
+            // B's WS must have been launched against wsB, not wsA.
+            assertEquals("client-B", wsB.lastClientId)
+
+            // And we should be able to receive a frame from B (proves
+            // B's job wasn't asynchronously cancelled).
+            val collector = async { runner.producedInputs.take(1).toList() }
+            advanceUntilIdle()
+            wsB.pushFrame(WsEvent.Status(queueRemaining = 0))
+            advanceUntilIdle()
+            val collected = collector.await()
+            assertEquals(1, collected.size)
+            assertIs<ConnectionInput.Ws>(collected.single())
+        } finally {
+            runner.shutdown()
+            wsA.frames.close()
+            wsB.frames.close()
+            coroutineContext.cancelChildren()
+        }
+    }
+
+    @Test fun switching_active_server_to_null_cancels_in_flight_ws() = runTest {
+        val ws = FakeWs()
+        val activeServer = activeServerWith(SERVER_A)
+        val runner = makeRunner(scope = this, ws = ws, activeServer = activeServer)
+        try {
+            runner.run(SideEffectIntent.OpenWs(clientId = "client-A"))
+            advanceUntilIdle()
+            assertEquals("client-A", ws.lastClientId)
+
+            // Active server cleared (e.g. user disconnected) and
+            // immediate OpenWs hits NO_ACTIVE_SERVER — synchronous
+            // sync inside run() picks up the change.
+            activeServer.clear()
+
+            val errorCollector = async { runner.emittedErrors.take(1).toList() }
+            advanceUntilIdle()
+            runner.run(SideEffectIntent.OpenWs(clientId = "client-after-clear"))
+            val errors = errorCollector.await()
+            assertEquals(listOf(ConnectError.NO_ACTIVE_SERVER), errors)
+        } finally {
+            runner.shutdown()
+            ws.frames.close()
+            coroutineContext.cancelChildren()
+        }
+    }
+
+    @Test fun switching_active_server_uses_new_baseUrl_for_subsequent_polls() = runTest {
+        // Verify the http factory is called with the new server, not
+        // the original one. We track factory invocations.
+        val invocations = mutableListOf<ServerInfo>()
+        val activeServer = activeServerWith(SERVER_A)
+        val runner = ConnectionEffectRunner(
+            activeServer = activeServer,
+            httpClientFactory = { server ->
+                invocations += server
+                http()
+            },
+            webSocketSourceFactory = { _ -> FakeWs() },
+            scope = this,
+        )
+        try {
+            runner.run(SideEffectIntent.PollHistory(promptId = "p-1"))
+            advanceUntilIdle()
+            // Switch server, immediately poll — no idle gap.
+            activeServer.setActive(SERVER_B)
+            runner.run(SideEffectIntent.PollHistory(promptId = "p-2"))
+            advanceUntilIdle()
+            // First poll resolved against A, second against B.
+            assertTrue(invocations.any { it.serverId == SERVER_A.serverId })
+            assertTrue(invocations.any { it.serverId == SERVER_B.serverId })
+        } finally {
+            runner.shutdown()
+            coroutineContext.cancelChildren()
+        }
+    }
+
+    @Test fun switching_active_server_cancels_in_flight_polls_without_emitting_stale_Error_UNKNOWN() = runTest {
+        // Per @Lily PR #19 review (`4413957569`) blocker 4:
+        // structured-concurrency cancellation triggered by a server
+        // switch must NOT surface as a stale `HistoryProbe(Error(UNKNOWN))`
+        // for the previous server.
+        //
+        // We use a slow http source so the poll is in flight when the
+        // switch happens; the synchronous-sync inside run(intent)
+        // cancels the running poll. We then assert that no
+        // `HistoryProbe(Error(UNKNOWN))` ever shows up.
+        val activeServer = activeServerWith(SERVER_A)
+        // Slow-running http: getHistoryEntry suspends for a long time
+        // to leave the poll in flight while we switch.
+        val slowHttp = ComfyHttpClient(
+            baseUrl = "http://stub",
+            client = HttpClient(MockEngine { _ ->
+                // Suspending the engine for a long time keeps the
+                // poll job in-flight until it gets cancelled.
+                kotlinx.coroutines.delay(60_000)
+                respond(
+                    content = ByteReadChannel("{}"),
+                    status = HttpStatusCode.OK,
+                    headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+                )
+            }) {
+                install(ContentNegotiation) {
+                    json(Json { ignoreUnknownKeys = true })
+                }
+            },
+        )
+        val runner = ConnectionEffectRunner(
+            activeServer = activeServer,
+            httpClientFactory = { _ -> slowHttp },
+            webSocketSourceFactory = { _ -> FakeWs() },
+            scope = this,
+        )
+        // Collect produced inputs WITHOUT a take limit, into a buffer.
+        val collected = mutableListOf<ConnectionInput>()
+        val collectorJob = launch {
+            runner.producedInputs.collect { collected += it }
+        }
+        try {
+            runner.run(SideEffectIntent.PollHistory(promptId = "p-1"))
+            // Don't advanceUntilIdle — leave the poll suspended.
+            advanceTimeBy(100)
+
+            // Switch server while the poll is in flight; this calls
+            // syncActiveServer() on the next run() and cancels p-1.
+            activeServer.setActive(SERVER_B)
+            // Sentinel: schedule a timer so we can wait for the
+            // scheduler to drain (the cancelled poll, the new run
+            // entry, and the timer).
+            runner.run(SideEffectIntent.ScheduleTimer(TimerTick.ReconnectFallbackPoll, millis = 50))
+            advanceTimeBy(200)
+
+            // No stale HistoryProbe(Error(UNKNOWN)) for p-1 should
+            // have shown up. There may be a Timer input from the
+            // sentinel — that's fine; we just assert no probe error.
+            val staleProbeErrors = collected
+                .filterIsInstance<ConnectionInput.HistoryProbe>()
+                .filter { it.result is HistoryProbeResult.Error }
+            assertTrue(
+                staleProbeErrors.isEmpty(),
+                "Expected NO stale HistoryProbe(Error) after cancellation, got: $staleProbeErrors",
+            )
+        } finally {
+            runner.shutdown()
+            collectorJob.cancel()
+            coroutineContext.cancelChildren()
+        }
+    }
+
+    private companion object {
+        val SERVER_A = ServerInfo(
+            serverId = "192.168.1.10:8188",
+            host = "192.168.1.10",
+            port = 8188,
+            label = "A",
+            lastConnectedAtEpochMs = 0L,
+        )
+        val SERVER_B = ServerInfo(
+            serverId = "192.168.1.20:8188",
+            host = "192.168.1.20",
+            port = 8188,
+            label = "B",
+            lastConnectedAtEpochMs = 0L,
+        )
+    }
 }
