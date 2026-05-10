@@ -69,7 +69,18 @@ class ConnectionStateMachineTest {
 
     private class FakeWs : WebSocketSource {
         val frames = Channel<WsEvent>(capacity = 64)
-        override fun connect(clientId: String): Flow<WsEvent> = frames.receiveAsFlow()
+        // Tracks every clientId that called connect() so integration
+        // tests can assert WS open / switch behaviour without reaching
+        // into the runner directly (per @Lily PR #19 review
+        // `4413996459`: regression must traverse the real
+        // `machine.dispatch(Retry)` path).
+        var lastClientId: String? = null
+        var connectCalls: Int = 0
+        override fun connect(clientId: String): Flow<WsEvent> {
+            lastClientId = clientId
+            connectCalls += 1
+            return frames.receiveAsFlow()
+        }
     }
 
     private fun buildMachine(scope: kotlinx.coroutines.CoroutineScope): Triple<ConnectionStateMachine, ConnectionEffectRunner, FakeWs> {
@@ -252,6 +263,128 @@ class ConnectionStateMachineTest {
         // wins after the reducer chains through all three.
         val lost = assertIs<ConnectionState.Lost>(machine.currentState.value)
         assertEquals(ConnectError.NOT_COMFYUI, lost.error)
+        machine.stop()
+    }
+
+    @Test fun manual_connect_from_initial_Connected_opens_WS_for_active_server() = runTest {
+        // Per @Lily PR #19 review (`4413996459`): the production
+        // path that exposed this bug is:
+        //   coordinator probe success
+        //   → activeServer.setActive(server)
+        //   → machine.dispatch(ConnectionInput.Retry)
+        // From the initial `Connected` state Retry was previously a
+        // no-op, so the runner never opened a WS — the app showed
+        // "Connected" with no live session. After the reducer fix
+        // (Connected + Retry → OpenWs side effect), the runner sees
+        // the active server and opens a real WS.
+        //
+        // This test traverses the full real path:
+        //   machine.dispatch(Retry) → reducer → runner.run(OpenWs)
+        //   → FakeWs.connect(clientId)
+        // No direct runner.run() calls — that would mask the reducer
+        // side-effect bug.
+        val ws = FakeWs()
+        val activeServer = ActiveServerHolder() // null at first
+        val runner = ConnectionEffectRunner(
+            activeServer = activeServer,
+            httpClientFactory = { _ -> http() },
+            webSocketSourceFactory = { _ -> ws },
+            scope = this,
+        )
+        val reducer = ConnectionStateReducer(clientIdProvider = { "client-uuid" })
+        val machine = ConnectionStateMachine(reducer, runner, this)
+        machine.start()
+        runCurrent()
+        assertEquals(ConnectionState.Connected, machine.currentState.value)
+        assertEquals(0, ws.connectCalls, "Pre-condition: no WS open before user connects")
+
+        // Coordinator-equivalent action sequence: setActive + Retry.
+        val server = ServerInfo(
+            serverId = "192.168.1.10:8188",
+            host = "192.168.1.10",
+            port = 8188,
+            label = "Studio",
+            lastConnectedAtEpochMs = 1L,
+        )
+        activeServer.setActive(server)
+        machine.dispatch(ConnectionInput.Retry)
+        runCurrent()
+
+        // Reducer's Connected + Retry → OpenWs → runner opens WS for
+        // the active server.
+        assertEquals(1, ws.connectCalls, "Expected exactly 1 WS open after manual connect")
+        assertEquals("client-uuid", ws.lastClientId)
+        // State stays Connected — we're confirming a live server, not
+        // recovering from a drop.
+        assertEquals(ConnectionState.Connected, machine.currentState.value)
+        machine.stop()
+    }
+
+    @Test fun manual_switch_A_to_B_while_Connected_cancels_A_and_opens_B() = runTest {
+        // Continuation of the previous regression: after we're
+        // Connected to A (one WS open), the user picks server B from
+        // history. The coordinator dispatches Retry again. The
+        // reducer's Connected + Retry → OpenWs side effect; the
+        // runner's syncActiveServer(B) cancels A's wsJob then opens
+        // a fresh WS against B's WebSocketSource.
+        //
+        // Different FakeWs instances per server prove the second
+        // connect() lands on B, not A. Real `dispatch(Retry)` path
+        // throughout — no direct runner.run() calls.
+        val wsA = FakeWs()
+        val wsB = FakeWs()
+        val serverA = ServerInfo(
+            serverId = "192.168.1.10:8188",
+            host = "192.168.1.10",
+            port = 8188,
+            label = "A",
+            lastConnectedAtEpochMs = 1L,
+        )
+        val serverB = ServerInfo(
+            serverId = "192.168.1.20:8188",
+            host = "192.168.1.20",
+            port = 8188,
+            label = "B",
+            lastConnectedAtEpochMs = 2L,
+        )
+        val activeServer = ActiveServerHolder().also { it.setActive(serverA) }
+        val runner = ConnectionEffectRunner(
+            activeServer = activeServer,
+            httpClientFactory = { _ -> http() },
+            webSocketSourceFactory = { server ->
+                when (server.serverId) {
+                    serverA.serverId -> wsA
+                    serverB.serverId -> wsB
+                    else -> error("unexpected server $server")
+                }
+            },
+            scope = this,
+        )
+        val reducer = ConnectionStateReducer(clientIdProvider = { "client-uuid" })
+        val machine = ConnectionStateMachine(reducer, runner, this)
+        machine.start()
+        runCurrent()
+
+        // Step 1: connect to A (initial Connected + Retry → opens A).
+        machine.dispatch(ConnectionInput.Retry)
+        runCurrent()
+        assertEquals(1, wsA.connectCalls, "WS A should be opened on first Retry")
+        assertEquals(0, wsB.connectCalls)
+
+        // Step 2: user switches to server B. Coordinator dispatches
+        // setActive(B) + Retry — same path.
+        activeServer.setActive(serverB)
+        machine.dispatch(ConnectionInput.Retry)
+        runCurrent()
+
+        // The runner's syncActiveServer cancelled A's wsJob (proven
+        // indirectly by the fact that we still get only one connect
+        // call on A — the same one as before — and connect on B).
+        assertEquals(1, wsA.connectCalls, "WS A should not be reopened")
+        assertEquals(1, wsB.connectCalls, "WS B should be opened after switch")
+        assertEquals("client-uuid", wsB.lastClientId)
+        // State stays Connected throughout.
+        assertEquals(ConnectionState.Connected, machine.currentState.value)
         machine.stop()
     }
 

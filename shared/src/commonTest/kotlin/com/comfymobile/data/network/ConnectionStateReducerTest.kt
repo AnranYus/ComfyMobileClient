@@ -213,6 +213,23 @@ class ConnectionStateReducerTest {
         assertTrue(transition.sideEffects.any { it is SideEffectIntent.OpenWs })
     }
 
+    @Test fun retry_from_connected_emits_open_ws_without_changing_state() {
+        // Per @Lily PR #19 review (`4413996459`): a successful manual
+        // connect dispatches `Retry` after `setActive`. From the
+        // initial `Connected + activeServer=null` state the reducer
+        // used to no-op, leaving the runner with no `OpenWs` to
+        // execute — so the app showed "Connected" without a live WS.
+        // The reducer now emits `OpenWs` so the runner actually opens
+        // the WebSocket for the now-active server. State stays
+        // Connected (the probe already verified the server).
+        val transition = reducer.reduce(ConnectionState.Connected, ConnectionInput.Retry)
+        assertEquals(ConnectionState.Connected, transition.next)
+        assertTrue(
+            transition.sideEffects.any { it is SideEffectIntent.OpenWs },
+            "Expected OpenWs side effect on Connected + Retry, got ${transition.sideEffects}",
+        )
+    }
+
     // ----------------------------------------------------------------- Custom config
 
     @Test fun custom_timeouts_propagate_into_schedule_timer_intents() {
