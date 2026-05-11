@@ -8,12 +8,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.Box
 import com.comfymobile.data.connect.ActiveServerHolder
 import com.comfymobile.data.connect.ConnectAttemptCoordinator
 import com.comfymobile.data.connection.ConnectionStateMachineFacade
+import com.comfymobile.data.workflow.WorkflowImporter
 import com.comfymobile.domain.server.ServerHistoryStore
 import com.comfymobile.presentation.connection.ConnectRoute
 import com.comfymobile.presentation.connection.ConnectViewModel
+import com.comfymobile.presentation.importer.WorkflowImportRoute
+import com.comfymobile.presentation.importer.WorkflowImportViewModel
 import org.koin.compose.getKoin
 import org.koin.core.parameter.parametersOf
 
@@ -73,12 +77,24 @@ fun App() {
                     parametersOf(viewModel, scope)
                 }
             }
+            val importViewModel = remember(scope) {
+                WorkflowImportViewModel(
+                    importerFactory = { koin.get<WorkflowImporter>() },
+                    scope = scope,
+                )
+            }
             DisposableEffect(coordinator) {
                 coordinator.start()
                 onDispose { coordinator.stop() }
             }
 
-            ConnectRoute(viewModel = viewModel)
+            Box(modifier = Modifier.fillMaxSize()) {
+                ConnectRoute(viewModel = viewModel)
+                WorkflowImportRoute(
+                    viewModel = importViewModel,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
         }
     }
 }
