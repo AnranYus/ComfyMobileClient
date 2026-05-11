@@ -21,6 +21,8 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
@@ -165,10 +167,21 @@ private fun DrawScope.drawNodeTitle(
     // Reserve roughly 28dp of right-side space for the (future)
     // status badge / icon so text doesn't run under it.
     val statusReservePx = 28f * dpToPx
+    // Per @Lily PR #24 review (`246d52a8`) blocker 2: constrain
+    // title text to the available width so long class_type strings
+    // ellipsis instead of overflowing into the badge / outside the
+    // node card. The available width is the title strip minus left
+    // padding (textPaddingPx) and the right-side status reservation.
+    val titleAvailableWidthPx =
+        (title.rect.width - textPaddingPx - statusReservePx)
+            .coerceAtLeast(1f)
+            .toInt()
     val measured = measurer.measure(
         text = title.text,
         style = style,
         maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        constraints = Constraints(maxWidth = titleAvailableWidthPx),
     )
     drawText(
         textLayoutResult = measured,
@@ -225,10 +238,16 @@ private fun DrawScope.drawSummaryRow(
         },
         color = row.textArgb.toComposeColor(),
     )
+    // Per @Lily PR #24 review (`246d52a8`) blocker 2: constrain text
+    // measurement to the node body's available width so long values
+    // ellipsis cleanly instead of overflowing the card.
+    val maxWidthInt = row.maxWidthPx.coerceAtLeast(1f).toInt()
     val measured = measurer.measure(
         text = row.text,
         style = style,
         maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        constraints = Constraints(maxWidth = maxWidthInt),
     )
     drawText(
         textLayoutResult = measured,

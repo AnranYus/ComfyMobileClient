@@ -298,11 +298,39 @@ class RenderPlanBuilderTest {
         // All rows share the same x (left padding inside node body)
         val xs = rows.map { it.origin.x }.toSet()
         assertEquals(1, xs.size, "all rows should align on x: $xs")
-        // Row y deltas are constant (rowPitch)
+        // Row y deltas are constant (rowPitch) and downward
         val ys = rows.map { it.origin.y }
         val deltas = ys.zipWithNext { a, b -> b - a }
-        assertEquals(1, deltas.toSet().size, "row pitch should be constant, got deltas: $deltas")
-        assertTrue(deltas.single() > 0f, "rows should advance downward")
+        // Per @Lily PR #24 review (`246d52a8`) blocker 1: with 3 rows
+        // there are 2 deltas, so `.single()` throws. Compare all deltas
+        // against the first instead.
+        assertTrue(deltas.isNotEmpty(), "expected at least one row pitch to compare")
+        val pitch = deltas.first()
+        assertTrue(pitch > 0f, "rows should advance downward, got pitch: $pitch")
+        assertTrue(
+            deltas.all { kotlin.math.abs(it - pitch) < 0.001f },
+            "row pitch should be constant, got deltas: $deltas",
+        )
+    }
+
+    @Test fun summary_row_maxWidthPx_equals_node_width_minus_two_paddings() {
+        // Per @Lily PR #24 review (`246d52a8`) blocker 2: drawScope
+        // must constrain text to a deterministic max width so long
+        // descriptor values ellipsis instead of overflowing the
+        // card. RenderPlanBuilder computes this width upstream so
+        // drawScope can stay lookup-free.
+        val graph = ParsedUiGraph(
+            nodes = listOf(node("n", pos = Position(0f, 0f), size = Size(200f, 200f))),
+            links = emptyList(),
+        )
+        val plan = buildPlan(
+            graph,
+            resolveSummaryRows = { _ -> listOf(SummaryEntry("text: some value")) },
+        )
+        val row = plan.commands.filterIsInstance<DrawCommand.SummaryRow>().single()
+        // LayoutConfig.Default.nodeBodyPadding = 8f → max = 200 - 2*8 = 184
+        val expectedMax = 200f - 2f * LayoutConfig.Default.nodeBodyPadding
+        assertEquals(expectedMax, row.maxWidthPx)
     }
 
     @Test fun status_accent_uses_caller_provided_palette_not_default_for_testing() {

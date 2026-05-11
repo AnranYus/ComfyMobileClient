@@ -142,6 +142,15 @@ sealed interface DrawCommand {
         val emphasis: SummaryEntry.Emphasis,
         val textArgb: Long,
         val fontSizeSp: Float,
+        /**
+         * Maximum text width in world-px before the renderer
+         * ellipsizes. Computed by [RenderPlanBuilder] from the node
+         * body width minus left/right padding; per @Lily PR #24
+         * review (`246d52a8`) blocker 2 the drawScope must NOT
+         * measure unconstrained — long parameter values would
+         * overflow the card.
+         */
+        val maxWidthPx: Float,
     ) : DrawCommand
 }
 
@@ -290,6 +299,13 @@ object RenderPlanBuilder {
                 val rows = resolveSummaryRows(node)
                 val firstRowY = rect.y + config.titleHeight + config.nodeBodyPadding
                 val rowPitch = summaryRowPalette.fontSizeSp + 4f
+                // Available text width = node width - left padding -
+                // right padding. Per @Lily PR #24 review `246d52a8`
+                // blocker 2: drawScope must measure text constrained
+                // to this width with ellipsis overflow so long
+                // values can't bleed out of the card.
+                val rowMaxWidthPx =
+                    (rect.width - config.nodeBodyPadding * 2f).coerceAtLeast(0f)
                 for ((rowIndex, entry) in rows.withIndex()) {
                     commands.add(
                         DrawCommand.SummaryRow(
@@ -306,6 +322,7 @@ object RenderPlanBuilder {
                                 SummaryEntry.Emphasis.MORE_HINT -> summaryRowPalette.moreHintTextArgb
                             },
                             fontSizeSp = summaryRowPalette.fontSizeSp,
+                            maxWidthPx = rowMaxWidthPx,
                         ),
                     )
                 }
