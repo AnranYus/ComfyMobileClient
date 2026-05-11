@@ -42,6 +42,7 @@ class RenderPlanBuilderTest {
         bodyMode: BodyMode = BodyMode.FULL,
         visibleBounds: Rect? = null,
         runtimeStatus: NodeRuntimeStatus = NodeRuntimeStatus.IDLE,
+        resolveSummaryRows: (ParsedNode) -> List<SummaryEntry> = { emptyList() },
     ): RenderPlan {
         val layout = GraphLayout.layout(graph)
         return RenderPlanBuilder.build(
@@ -66,6 +67,7 @@ class RenderPlanBuilderTest {
             },
             resolvePortStyle = { p -> NodeStyleResolver.resolvePort(p, palette) },
             resolveTitle = { n -> NodeTitleSpec(n.classType, italic = bodyMode == BodyMode.TITLE_ONLY) },
+            resolveSummaryRows = resolveSummaryRows,
             visibleBounds = visibleBounds,
         )
     }
@@ -234,10 +236,95 @@ class RenderPlanBuilderTest {
         assertEquals(StatusBadge.SPINNER, title.statusBadge)
     }
 
+    // ---------------------------------------------------------------- §1.3 summary rows
+
+    @Test fun summary_rows_emit_one_drawcommand_per_resolved_entry() {
+        // Per @Ores T2.7 §1.3: each SummaryEntry produces one
+        // DrawCommand.SummaryRow with monotonically increasing
+        // rowIndex starting from 0.
+        val graph = ParsedUiGraph(
+            nodes = listOf(node("n")),
+            links = emptyList(),
+        )
+        val plan = buildPlan(
+            graph,
+            bodyMode = BodyMode.FULL,
+            resolveSummaryRows = { _ ->
+                listOf(
+                    SummaryEntry(text = "seed: 12345", emphasis = SummaryEntry.Emphasis.PARAM),
+                    SummaryEntry(text = "steps: 30", emphasis = SummaryEntry.Emphasis.PARAM),
+                    SummaryEntry(text = "cfg: 7.5", emphasis = SummaryEntry.Emphasis.PARAM),
+                    SummaryEntry(text = "…3 more", emphasis = SummaryEntry.Emphasis.MORE_HINT),
+                )
+            },
+        )
+        val rows = plan.commands.filterIsInstance<DrawCommand.SummaryRow>()
+        assertEquals(4, rows.size)
+        assertEquals(4, plan.visibleSummaryRowCount())
+        // rowIndex monotonic
+        assertEquals(listOf(0, 1, 2, 3), rows.map { it.rowIndex })
+        // text preserved
+        assertEquals("seed: 12345", rows[0].text)
+        assertEquals("…3 more", rows[3].text)
+        // emphasis preserved
+        assertEquals(SummaryEntry.Emphasis.PARAM, rows[0].emphasis)
+        assertEquals(SummaryEntry.Emphasis.MORE_HINT, rows[3].emphasis)
+        // colours route by emphasis: PARAM rows get paramTextArgb,
+        // MORE_HINT gets moreHintTextArgb. Defaults from
+        // SummaryRowPalette.defaultLightForTesting.
+        val defaultPalette = SummaryRowPalette.defaultLightForTesting
+        assertEquals(defaultPalette.paramTextArgb, rows[0].textArgb)
+        assertEquals(defaultPalette.moreHintTextArgb, rows[3].textArgb)
+    }
+
+    @Test fun summary_rows_origin_advances_vertically_with_constant_pitch() {
+        val graph = ParsedUiGraph(
+            nodes = listOf(node("n", pos = Position(100f, 50f))),
+            links = emptyList(),
+        )
+        val plan = buildPlan(
+            graph,
+            resolveSummaryRows = { _ ->
+                listOf(
+                    SummaryEntry("a: 1"),
+                    SummaryEntry("b: 2"),
+                    SummaryEntry("c: 3"),
+                )
+            },
+        )
+        val rows = plan.commands.filterIsInstance<DrawCommand.SummaryRow>()
+        // All rows share the same x (left padding inside node body)
+        val xs = rows.map { it.origin.x }.toSet()
+        assertEquals(1, xs.size, "all rows should align on x: $xs")
+        // Row y deltas are constant (rowPitch)
+        val ys = rows.map { it.origin.y }
+        val deltas = ys.zipWithNext { a, b -> b - a }
+        assertEquals(1, deltas.toSet().size, "row pitch should be constant, got deltas: $deltas")
+        assertTrue(deltas.single() > 0f, "rows should advance downward")
+    }
+
+    @Test fun title_only_node_does_NOT_emit_summary_rows() {
+        // Per @Ores §1.1 + §1.3: unknown nodes collapse to title-only
+        // and never show summary content.
+        val graph = ParsedUiGraph(
+            nodes = listOf(node("u")),
+            links = emptyList(),
+        )
+        val plan = buildPlan(
+            graph,
+            bodyMode = BodyMode.TITLE_ONLY,
+            // Even if a resolver tries to inject rows for an unknown node,
+            // the builder must skip them — TITLE_ONLY → no body content.
+            resolveSummaryRows = { _ -> listOf(SummaryEntry("should not appear")) },
+        )
+        assertEquals(0, plan.visibleSummaryRowCount())
+    }
+
     private fun DrawCommand.nodeIdOrNull(): String? = when (this) {
         is DrawCommand.NodeBody -> nodeId
         is DrawCommand.NodeTitle -> nodeId
         is DrawCommand.NodePort -> nodeId
+        is DrawCommand.SummaryRow -> nodeId
         is DrawCommand.Edge -> null
     }
 }

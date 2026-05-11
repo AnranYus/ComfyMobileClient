@@ -71,6 +71,7 @@ object UiGraphParser {
     private const val NODE_KEY_SIZE = "size"
     private const val NODE_KEY_INPUTS = "inputs"
     private const val NODE_KEY_OUTPUTS = "outputs"
+    private const val NODE_KEY_WIDGETS_VALUES = "widgets_values"
 
     /** Per-port JSON keys. */
     private const val PORT_KEY_NAME = "name"
@@ -100,6 +101,11 @@ object UiGraphParser {
             originalSize = obj[NODE_KEY_SIZE]?.asSizeOrNull(),
             inputs = obj[NODE_KEY_INPUTS]?.asJsonArrayOrNull()?.parsePorts() ?: emptyList(),
             outputs = obj[NODE_KEY_OUTPUTS]?.asJsonArrayOrNull()?.parsePorts() ?: emptyList(),
+            // `widgets_values` is an ordered JSON array; preserve the
+            // raw JsonElement per slot so the render layer can format
+            // each value according to the matching ParamDescriptor's
+            // ControlType (Slider → "0.7", MultilineText → "a beauti…").
+            widgetsValues = obj[NODE_KEY_WIDGETS_VALUES]?.asJsonArrayOrNull()?.toList() ?: emptyList(),
         )
     }
 

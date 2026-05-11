@@ -1,6 +1,7 @@
 package com.comfymobile.presentation.graph
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 
 /**
  * Normalised mobile-side projection of [com.comfymobile.domain.workflow.WorkflowGraph.Ui].
@@ -52,6 +53,25 @@ data class ParsedNode(
     val originalSize: Size? = null,
     val inputs: List<NodePort> = emptyList(),
     val outputs: List<NodePort> = emptyList(),
+    /**
+     * The ComfyUI editor save's `widgets_values` array, in declaration
+     * order — slot 0 maps to descriptor.editableParams[0] etc.
+     *
+     * Kept as raw [JsonElement] (number / string / bool / null /
+     * nested object) because (a) the value type varies per control
+     * (Slider → Double, Integer → Long, MultilineText → String,
+     * Toggle → Boolean) and (b) we want to round-trip the original
+     * value structurally — see ADR-0003 on structure-lossless
+     * preservation.
+     *
+     * The presentation layer's `SummaryRowResolver` is responsible
+     * for formatting each entry into a single display line.
+     *
+     * Empty when the editor save didn't record widget values (rare —
+     * happens with very old workflows or for nodes that have no
+     * widgets).
+     */
+    val widgetsValues: List<JsonElement> = emptyList(),
 )
 
 /**

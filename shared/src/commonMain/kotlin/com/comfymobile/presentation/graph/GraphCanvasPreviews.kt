@@ -115,6 +115,28 @@ private fun previewPlan(
                 italic = node.classType == "MyCustomFancyNode",
             )
         },
+        resolveSummaryRows = { node ->
+            // Preview-only mock summary rows so the previews exercise
+            // the §1.3 rendering branch without wiring a real
+            // NodeDescriptorRegistry. Production code calls
+            // `SummaryRowResolver.resolve(node, registry.lookup(...))`.
+            when (node.classType) {
+                "CheckpointLoaderSimple" -> listOf(
+                    SummaryEntry("ckpt: sd_xl_base.s…"),
+                )
+                "KSampler" -> listOf(
+                    SummaryEntry("seed: 12345"),
+                    SummaryEntry("steps: 30"),
+                    SummaryEntry("cfg: 7.5"),
+                    SummaryEntry("…3 more", SummaryEntry.Emphasis.MORE_HINT),
+                )
+                "VAEDecode" -> emptyList()
+                "SaveImage" -> listOf(
+                    SummaryEntry("prefix: render"),
+                )
+                else -> emptyList()
+            }
+        },
     )
 }
 

@@ -22,6 +22,30 @@ data class RenderPlan(val commands: List<DrawCommand>) {
 
     /** Convenience: count edges in the plan. */
     fun visibleEdgeCount(): Int = commands.count { it is DrawCommand.Edge }
+
+    /** Convenience: count summary rows in the plan (for perf + UX assertions). */
+    fun visibleSummaryRowCount(): Int = commands.count { it is DrawCommand.SummaryRow }
+}
+
+/**
+ * Palette for the per-node summary-row text. Split from
+ * [GraphPalette] so callers can theme summary text independently of
+ * the node body colours (per @Ores T2.7 §1.3 — body text uses a
+ * muted role that may differ from the node-body fill).
+ */
+data class SummaryRowPalette(
+    val paramTextArgb: Long,
+    val moreHintTextArgb: Long,
+    val fontSizeSp: Float = 11f,
+) {
+    companion object {
+        /** Light-theme defaults used by tests and previews. */
+        val defaultLightForTesting: SummaryRowPalette = SummaryRowPalette(
+            paramTextArgb = 0xFF424242,    // onSurface medium
+            moreHintTextArgb = 0xFF9E9E9E, // onSurface low / outline
+            fontSizeSp = 11f,
+        )
+    }
 }
 
 /**
@@ -47,12 +71,14 @@ sealed interface DrawCommand {
         val argb: Long,
         val widthDp: Float,
         /**
-         * If true, the renderer should fall back to a polyline /
-         * orthogonal approximation instead of the smooth bezier.
-         * T2.1a always emits `false`; T2.1b's drag handler flips this
-         * during drag (per @Ores T2.7 §1.5 + T0.5 perf gate step 3).
+         * If true, the renderer should fall back to a **straight
+         * line** from start→end instead of the smooth bezier (per
+         * @Ores PR #21 §1.5 / §1.8 locked LOD contract msg `26c8f2f3`:
+         * "any active pan/zoom/node-drag → Bezier → straight line;
+         * release → Bezier"). T2.1a always emits `false`; T2.1b's
+         * gesture handler toggles to `true` during interaction.
          */
-        val orthogonalFallback: Boolean = false,
+        val straightLineFallback: Boolean = false,
     ) : DrawCommand
 
     /**
@@ -97,6 +123,26 @@ sealed interface DrawCommand {
         val argb: Long,
         val isOutput: Boolean,
     ) : DrawCommand
+
+    /**
+     * One pre-formatted summary line drawn inside a FULL-body node
+     * below the title bar. Per @Ores T2.7 §1.3 + clarification msg
+     * `6b943636`: shows `descriptor.editableParams.take(3)` in
+     * declaration order, with a trailing `…N more` line when
+     * `editableParams.size > 4`.
+     *
+     * Pre-formatted by [SummaryRowResolver] so the Compose drawScope
+     * never has to look up descriptors / control types.
+     */
+    data class SummaryRow(
+        val nodeId: String,
+        val rowIndex: Int,
+        val origin: Position,
+        val text: String,
+        val emphasis: SummaryEntry.Emphasis,
+        val textArgb: Long,
+        val fontSizeSp: Float,
+    ) : DrawCommand
 }
 
 object RenderPlanBuilder {
@@ -126,8 +172,26 @@ object RenderPlanBuilder {
         resolveStyle: (ParsedNode) -> NodeStyle,
         resolvePortStyle: (com.comfymobile.presentation.graph.NodePort) -> PortStyle,
         resolveTitle: (ParsedNode) -> NodeTitleSpec,
+        /**
+         * Resolves a node's summary rows for §1.3 in-card param
+         * preview. Returns empty list when the node is unknown
+         * (TITLE_ONLY body) or the descriptor has no editableParams.
+         *
+         * Production callers wire this to:
+         * ```
+         * { node -> SummaryRowResolver.resolve(node, registry.lookup(node.classType)) }
+         * ```
+         */
+        resolveSummaryRows: (ParsedNode) -> List<SummaryEntry> = { emptyList() },
         visibleBounds: Rect? = null,
         config: LayoutConfig = LayoutConfig.Default,
+        /**
+         * Per @Ores T2.7 §1.3: summary rows render in muted body
+         * text colour, slightly dimmer for the trailing `…N more`
+         * line. Production callers pass theme-resolved values; tests
+         * accept the [defaultLightForTesting] defaults.
+         */
+        summaryRowPalette: SummaryRowPalette = SummaryRowPalette.defaultLightForTesting,
     ): RenderPlan {
         val nodeById = graph.nodes.associateBy { it.id }
         val visibleNodeIds = layoutResult.nodes.entries
@@ -202,6 +266,33 @@ object RenderPlanBuilder {
                     ),
                 ),
             )
+
+            // Summary rows (only on FULL-body, descriptor-known nodes
+            // — per @Ores §1.3, TITLE_ONLY nodes do not show rows).
+            if (style.bodyMode == BodyMode.FULL) {
+                val rows = resolveSummaryRows(node)
+                val firstRowY = rect.y + config.titleHeight + config.nodeBodyPadding
+                val rowPitch = summaryRowPalette.fontSizeSp + 4f
+                for ((rowIndex, entry) in rows.withIndex()) {
+                    commands.add(
+                        DrawCommand.SummaryRow(
+                            nodeId = nodeId,
+                            rowIndex = rowIndex,
+                            origin = Position(
+                                x = rect.x + config.nodeBodyPadding,
+                                y = firstRowY + rowIndex * rowPitch,
+                            ),
+                            text = entry.text,
+                            emphasis = entry.emphasis,
+                            textArgb = when (entry.emphasis) {
+                                SummaryEntry.Emphasis.PARAM -> summaryRowPalette.paramTextArgb
+                                SummaryEntry.Emphasis.MORE_HINT -> summaryRowPalette.moreHintTextArgb
+                            },
+                            fontSizeSp = summaryRowPalette.fontSizeSp,
+                        ),
+                    )
+                }
+            }
 
             // Ports (only on FULL-body nodes; TITLE_ONLY has none)
             if (style.bodyMode == BodyMode.FULL) {
