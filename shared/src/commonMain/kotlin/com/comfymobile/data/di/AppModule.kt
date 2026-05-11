@@ -24,6 +24,7 @@ import com.comfymobile.data.descriptor.NodeDescriptorRegistry
 import com.comfymobile.data.image.ComfyImageMapper
 import com.comfymobile.data.image.PreviewFormat
 import com.comfymobile.data.image.PreviewSpec
+import com.comfymobile.data.image.createComfyImageLoader
 import com.comfymobile.domain.connection.LifecycleMonitor
 import com.comfymobile.domain.connection.NetworkMonitor
 import com.comfymobile.domain.job.JobRepository
@@ -32,6 +33,7 @@ import com.comfymobile.domain.workflow.WorkflowRepository
 import com.comfymobile.presentation.history.ComfyHistoryThumbnailMapper
 import com.comfymobile.presentation.history.HistoryThumbnailMapper
 import com.comfymobile.presentation.history.HistoryViewModel
+import com.comfymobile.presentation.gallery.OutputGalleryViewModel
 import com.comfymobile.presentation.parameditor.ActiveServerParamOptionProvider
 import com.comfymobile.presentation.parameditor.ParamEditorViewModel
 import com.comfymobile.presentation.parameditor.ParamOptionProvider
@@ -39,6 +41,7 @@ import io.ktor.client.HttpClient
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.plugins.websocket.WebSockets
 import io.ktor.serialization.kotlinx.json.json
+import coil3.ImageLoader
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -121,6 +124,13 @@ fun appModule(): Module = module {
                     quality = 80,
                 ),
             ),
+        )
+    }
+
+    single<ImageLoader> {
+        createComfyImageLoader(
+            context = get(),
+            httpClient = get(qualifier = SHARED_HTTP_CLIENT),
         )
     }
 
@@ -280,6 +290,15 @@ fun appModule(): Module = module {
             scope = vmScope,
             nowEpochMs = { nowEpochMs() },
             thumbnailMapper = get(),
+        )
+    }
+
+    factory<OutputGalleryViewModel> {
+        val activeServerHolder = get<ActiveServerHolder>()
+        OutputGalleryViewModel(
+            imageMapper = ComfyImageMapper(
+                activeBaseUrlProvider = { activeServerHolder.current.value?.baseUrl },
+            ),
         )
     }
 }
