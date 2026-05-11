@@ -21,6 +21,12 @@ interface JobRepository {
     /** Update only the status / finished_at of an existing row. */
     suspend fun updateStatus(promptId: String, status: JobStatus, finishedAtEpochMs: Long?)
 
+    /** Update the user-visible label for a history row. */
+    suspend fun updateLabel(promptId: String, label: String?)
+
+    /** Update the first output ref used by history thumbnails. */
+    suspend fun updateFirstOutput(promptId: String, firstOutput: JobOutputRef?)
+
     /** Single-row lookup by primary key. */
     suspend fun getByPromptId(promptId: String): Job?
 
@@ -46,6 +52,9 @@ interface JobRepository {
 
     /** Wipe every job for a server (used when removing a server entry). */
     suspend fun deleteByServer(serverId: String)
+
+    /** Delete one job row from history. */
+    suspend fun deleteByPromptId(promptId: String)
 
     /** Wipe every job (used when clearing app data). */
     suspend fun deleteAll()

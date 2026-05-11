@@ -35,6 +35,23 @@ enum class JobStatus(val wireValue: String) {
 }
 
 /**
+ * First image-like output attached to a job, stored in the local
+ * index so history rows can resolve a thumbnail without asking
+ * ComfyUI `/history` every time.
+ */
+data class JobOutputRef(
+    val filename: String,
+    val subfolder: String = "",
+    val type: String = TYPE_OUTPUT,
+) {
+    companion object {
+        const val TYPE_OUTPUT: String = "output"
+        const val TYPE_INPUT: String = "input"
+        const val TYPE_TEMP: String = "temp"
+    }
+}
+
+/**
  * One row in the local job index. Mirrors the SQLDelight `jobIndex`
  * table but exposes a strongly-typed [JobStatus] enum and `Long?`
  * timestamps converted from the underlying nullable integer column.
@@ -46,6 +63,7 @@ data class Job(
     val workflowSnapshotJson: String? = null,
     val apiPromptJson: String? = null,
     val label: String? = null,
+    val firstOutput: JobOutputRef? = null,
     val createdAtEpochMs: Long,
     val finishedAtEpochMs: Long? = null,
 )

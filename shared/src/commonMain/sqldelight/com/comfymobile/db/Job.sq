@@ -39,6 +39,13 @@ CREATE TABLE jobIndex (
     -- name + a generation index for display in the history list.
     label TEXT,
 
+    -- Optional first output triple for history thumbnails. T2.3/T2.4
+    -- can fill this when ComfyUI reports generated outputs; rows
+    -- without it render the spec fallback thumbnail.
+    first_output_filename TEXT,
+    first_output_subfolder TEXT,
+    first_output_type TEXT,
+
     -- Unix milliseconds. created_at is set when we first record the
     -- submission attempt; finished_at is set once the row reaches a
     -- terminal status (succeeded / failed / interrupted).
@@ -63,11 +70,23 @@ upsertJob:
 INSERT OR REPLACE INTO jobIndex(
     prompt_id, server_id, status,
     workflow_snapshot_json, api_prompt_json,
-    label, created_at, finished_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+    label,
+    first_output_filename, first_output_subfolder, first_output_type,
+    created_at, finished_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 updateStatus:
 UPDATE jobIndex SET status = ?, finished_at = ? WHERE prompt_id = ?;
+
+updateLabel:
+UPDATE jobIndex SET label = ? WHERE prompt_id = ?;
+
+updateFirstOutput:
+UPDATE jobIndex
+SET first_output_filename = ?,
+    first_output_subfolder = ?,
+    first_output_type = ?
+WHERE prompt_id = ?;
 
 selectByPromptId:
 SELECT * FROM jobIndex WHERE prompt_id = ?;
@@ -86,6 +105,9 @@ ORDER BY created_at DESC;
 
 deleteByServer:
 DELETE FROM jobIndex WHERE server_id = ?;
+
+deleteByPromptId:
+DELETE FROM jobIndex WHERE prompt_id = ?;
 
 deleteAll:
 DELETE FROM jobIndex;

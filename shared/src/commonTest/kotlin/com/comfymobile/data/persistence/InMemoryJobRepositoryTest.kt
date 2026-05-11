@@ -1,6 +1,7 @@
 package com.comfymobile.data.persistence
 
 import com.comfymobile.domain.job.Job
+import com.comfymobile.domain.job.JobOutputRef
 import com.comfymobile.domain.job.JobStatus
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
@@ -62,6 +63,28 @@ class InMemoryJobRepositoryTest {
         assertNull(repo.getByPromptId("missing"))
     }
 
+    @Test fun updateLabel_mutates_only_label() = runTest {
+        val repo = InMemoryJobRepository()
+        repo.upsert(job(promptId = "p-1", status = JobStatus.SUCCEEDED, createdAt = 1000L))
+        repo.updateLabel("p-1", "Renamed")
+        val out = repo.getByPromptId("p-1")!!
+        assertEquals("Renamed", out.label)
+        assertEquals(JobStatus.SUCCEEDED, out.status)
+        assertEquals(1000L, out.createdAtEpochMs)
+    }
+
+    @Test fun updateFirstOutput_mutates_only_thumbnail_ref() = runTest {
+        val repo = InMemoryJobRepository()
+        repo.upsert(job(promptId = "p-1"))
+        repo.updateFirstOutput(
+            "p-1",
+            JobOutputRef(filename = "ComfyUI_00001_.png", subfolder = "", type = "output"),
+        )
+        val out = repo.getByPromptId("p-1")!!
+        assertEquals("ComfyUI_00001_.png", out.firstOutput?.filename)
+        assertEquals(JobStatus.QUEUED, out.status)
+    }
+
     @Test fun listByServer_orders_by_createdAt_descending() = runTest {
         val repo = InMemoryJobRepository()
         repo.upsert(job(promptId = "p-1", createdAt = 1000L))
@@ -106,6 +129,15 @@ class InMemoryJobRepositoryTest {
         repo.upsert(job(promptId = "p-1", serverId = "srv-A"))
         repo.upsert(job(promptId = "p-2", serverId = "srv-B"))
         repo.deleteByServer("srv-A")
+        assertNull(repo.getByPromptId("p-1"))
+        assertEquals("p-2", repo.getByPromptId("p-2")?.promptId)
+    }
+
+    @Test fun deleteByPromptId_removes_single_row_only() = runTest {
+        val repo = InMemoryJobRepository()
+        repo.upsert(job(promptId = "p-1"))
+        repo.upsert(job(promptId = "p-2"))
+        repo.deleteByPromptId("p-1")
         assertNull(repo.getByPromptId("p-1"))
         assertEquals("p-2", repo.getByPromptId("p-2")?.promptId)
     }

@@ -1,6 +1,7 @@
 package com.comfymobile.data.persistence
 
 import com.comfymobile.domain.job.Job
+import com.comfymobile.domain.job.JobOutputRef
 import com.comfymobile.domain.job.JobRepository
 import com.comfymobile.domain.job.JobStatus
 import kotlinx.coroutines.flow.Flow
@@ -47,6 +48,22 @@ class InMemoryJobRepository : JobRepository {
         }
     }
 
+    override suspend fun updateLabel(promptId: String, label: String?) {
+        mutex.withLock {
+            val current = state.value
+            val existing = current[promptId] ?: return
+            state.value = current + (promptId to existing.copy(label = label))
+        }
+    }
+
+    override suspend fun updateFirstOutput(promptId: String, firstOutput: JobOutputRef?) {
+        mutex.withLock {
+            val current = state.value
+            val existing = current[promptId] ?: return
+            state.value = current + (promptId to existing.copy(firstOutput = firstOutput))
+        }
+    }
+
     override suspend fun getByPromptId(promptId: String): Job? = state.value[promptId]
 
     override suspend fun listByServer(serverId: String, limit: Int, offset: Int): List<Job> =
@@ -69,6 +86,12 @@ class InMemoryJobRepository : JobRepository {
     override suspend fun deleteByServer(serverId: String) {
         mutex.withLock {
             state.value = state.value.filterValues { it.serverId != serverId }
+        }
+    }
+
+    override suspend fun deleteByPromptId(promptId: String) {
+        mutex.withLock {
+            state.value = state.value - promptId
         }
     }
 
