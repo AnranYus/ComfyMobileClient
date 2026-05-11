@@ -54,8 +54,14 @@ data class ParsedNode(
     val inputs: List<NodePort> = emptyList(),
     val outputs: List<NodePort> = emptyList(),
     /**
-     * The ComfyUI editor save's `widgets_values` array, in declaration
-     * order — slot 0 maps to descriptor.editableParams[0] etc.
+     * The ComfyUI editor save's `widgets_values` array, in ComfyUI
+     * widget declaration order. Most nodes map slot N to
+     * `descriptor.editableParams[N]`, but some nodes inject UI-only
+     * widgets (for example `KSampler.control_after_generate` after
+     * `seed`). Callers must use
+     * [com.comfymobile.domain.workflow.WorkflowWidgetValueIndex] when
+     * reading a descriptor param from this array instead of assuming
+     * a raw descriptor index.
      *
      * Kept as raw [JsonElement] (number / string / bool / null /
      * nested object) because (a) the value type varies per control

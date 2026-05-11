@@ -26,6 +26,9 @@ import com.comfymobile.domain.connection.NetworkMonitor
 import com.comfymobile.domain.job.JobRepository
 import com.comfymobile.domain.server.ServerHistoryStore
 import com.comfymobile.domain.workflow.WorkflowRepository
+import com.comfymobile.presentation.parameditor.ActiveServerParamOptionProvider
+import com.comfymobile.presentation.parameditor.ParamEditorViewModel
+import com.comfymobile.presentation.parameditor.ParamOptionProvider
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.plugins.websocket.WebSockets
@@ -90,6 +93,15 @@ fun appModule(): Module = module {
             repository = get(),
             nowEpochMs = { nowEpochMs() },
             descriptorRegistry = runCatching { get<NodeDescriptorRegistry>() }.getOrNull(),
+        )
+    }
+
+    single<ParamOptionProvider> {
+        ActiveServerParamOptionProvider(
+            activeServer = get(),
+            httpClientFactory = { server ->
+                get<ComfyHttpClient> { org.koin.core.parameter.parametersOf(server.baseUrl) }
+            },
         )
     }
 
@@ -230,6 +242,15 @@ fun appModule(): Module = module {
                 get<ComfyHttpClient> { org.koin.core.parameter.parametersOf(baseUrl) }
                     .getSystemStats()
             },
+        )
+    }
+
+    factory<ParamEditorViewModel> { (vmScope: CoroutineScope) ->
+        ParamEditorViewModel(
+            registry = get(),
+            optionProvider = get(),
+            scope = vmScope,
+            nowEpochMs = { nowEpochMs() },
         )
     }
 }

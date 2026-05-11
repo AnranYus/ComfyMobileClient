@@ -30,9 +30,12 @@ class SummaryRowResolverTest {
         )
 
     private fun descriptor(vararg params: ParamDescriptor): NodeDescriptor =
+        descriptor(classType = "Stub", params = params)
+
+    private fun descriptor(classType: String, params: Array<out ParamDescriptor>): NodeDescriptor =
         NodeDescriptor(
-            classType = "Stub",
-            displayName = LocalizedString(zh = "Stub", en = "Stub"),
+            classType = classType,
+            displayName = LocalizedString(zh = classType, en = classType),
             category = "test",
             editableParams = params.toList(),
         )
@@ -40,6 +43,12 @@ class SummaryRowResolverTest {
     private fun node(values: List<JsonElement>): ParsedNode = ParsedNode(
         id = "n",
         classType = "Stub",
+        widgetsValues = values,
+    )
+
+    private fun node(classType: String, values: List<JsonElement>): ParsedNode = ParsedNode(
+        id = "n",
+        classType = classType,
         widgetsValues = values,
     )
 
@@ -117,6 +126,35 @@ class SummaryRowResolverTest {
         assertEquals(SummaryEntry.Emphasis.MORE_HINT, rows[3].emphasis)
         // The hint shows the remaining count (6 total - 3 shown = 3 more).
         assertEquals("…3 more", rows[3].text)
+    }
+
+    @Test fun ksampler_summary_skips_ui_only_control_after_generate_slot() {
+        val rows = SummaryRowResolver.resolve(
+            node = node(
+                classType = "KSampler",
+                values = listOf(
+                    JsonPrimitive(12345),
+                    JsonPrimitive("randomize"),
+                    JsonPrimitive(20),
+                    JsonPrimitive(7.5),
+                    JsonPrimitive("euler_a"),
+                ),
+            ),
+            descriptor = descriptor(
+                classType = "KSampler",
+                params = arrayOf(
+                    param("seed", ControlType.Integer()),
+                    param("steps", ControlType.Slider(min = 1.0, max = 150.0, step = 1.0)),
+                    param("cfg", ControlType.Slider(min = 0.0, max = 30.0, step = 0.5)),
+                    param("sampler_name", ControlType.Dropdown(source = com.comfymobile.domain.node.Source.NodeEnumFromObjectInfo())),
+                    param("scheduler", ControlType.Dropdown(source = com.comfymobile.domain.node.Source.NodeEnumFromObjectInfo())),
+                ),
+            ),
+        )
+
+        assertEquals("seed: 12345", rows[0].text)
+        assertEquals("steps: 20", rows[1].text)
+        assertEquals("cfg: 7.5", rows[2].text)
     }
 
     // ---------------------------------------------------------------- formatting per control type
