@@ -226,13 +226,17 @@ object RenderPlanBuilder {
 
         // Edges first so node bodies layer over them near each port.
         for ((linkId, path) in layoutResult.edges) {
-            // Skip edges whose endpoints both fall outside the
-            // visible viewport. (An edge with one end inside still
-            // draws so the user sees the connection terminate.)
-            if (visibleBounds != null) {
-                val startIn = visibleBounds.contains(path.start)
-                val endIn = visibleBounds.contains(path.end)
-                if (!startIn && !endIn) continue
+            // Viewport culling using the **bezier control-point
+            // bounding box**, not just endpoints. Per @Lily PR #24
+            // thread review #2 (msg `b025c831`): the previous
+            // endpoint-only check was a placeholder — a curve that
+            // bulges through the visible area while both endpoints
+            // sit outside it would incorrectly disappear. Inflate
+            // the bbox by `EDGE_STROKE_INFLATE_PX` to keep edges
+            // visible right up to the canvas edge instead of getting
+            // clipped a stroke-width too early.
+            if (visibleBounds != null && !path.controlPointsBbox().intersects(visibleBounds)) {
+                continue
             }
             // Find link record so we can colour by type.
             val link = graph.links.firstOrNull { it.linkId == linkId } ?: continue
@@ -407,3 +411,26 @@ internal fun Rect.contains(point: Position): Boolean =
 /** True when [other] intersects this rect (axis-aligned). */
 internal fun NodeRect.intersects(other: Rect): Boolean =
     !(right < other.left || x > other.right || bottom < other.top || y > other.bottom)
+
+/** Edge stroke-width inflation (world px) for control-point bbox culling. */
+private const val EDGE_STROKE_INFLATE_PX: Float = 4f
+
+/**
+ * Axis-aligned bounding box of all 4 cubic-bezier control points,
+ * inflated by [EDGE_STROKE_INFLATE_PX] on each side to account for
+ * the stroke width. A curve always stays inside the bbox of its
+ * control polygon, so this is a *conservative* visibility test —
+ * never culls a visible edge, may keep some marginally off-screen
+ * edges (acceptable overdraw).
+ */
+internal fun EdgePath.controlPointsBbox(): Rect {
+    val minX = minOf(start.x, control1.x, control2.x, end.x) - EDGE_STROKE_INFLATE_PX
+    val minY = minOf(start.y, control1.y, control2.y, end.y) - EDGE_STROKE_INFLATE_PX
+    val maxX = maxOf(start.x, control1.x, control2.x, end.x) + EDGE_STROKE_INFLATE_PX
+    val maxY = maxOf(start.y, control1.y, control2.y, end.y) + EDGE_STROKE_INFLATE_PX
+    return Rect(left = minX, top = minY, right = maxX, bottom = maxY)
+}
+
+/** True when this Rect intersects [other] (axis-aligned). */
+internal fun Rect.intersects(other: Rect): Boolean =
+    !(right < other.left || left > other.right || bottom < other.top || top > other.bottom)

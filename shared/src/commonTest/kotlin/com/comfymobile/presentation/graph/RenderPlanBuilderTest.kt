@@ -156,6 +156,45 @@ class RenderPlanBuilderTest {
         assertEquals(1, plan.visibleEdgeCount())
     }
 
+    @Test fun viewport_keeps_edge_whose_bezier_curve_passes_through_visible_area() {
+        // Per @Lily PR #24 thread review #2 (msg `b025c831`): the
+        // edge-culling check must use the bezier control-point bbox,
+        // not just endpoints. An edge whose endpoints lie outside
+        // the viewport but whose curve bulges through the visible
+        // area must NOT be culled.
+        //
+        // Construct: source node far left, target node far right;
+        // viewport covers only the middle band. The control points
+        // (control1/control2) for the auto-generated bezier lie
+        // along the same horizontal as the endpoints (off-screen),
+        // so the *control bbox* on its own wouldn't intersect the
+        // viewport either. Override the layout-derived edge with a
+        // hand-crafted EdgePath whose control points DIP into the
+        // visible band.
+        val graph = ParsedUiGraph(
+            nodes = listOf(
+                node("a", pos = Position(0f, 0f), size = Size(80f, 80f),
+                    outputs = listOf(port(0, "MODEL"))),
+                node("b", pos = Position(2000f, 0f), size = Size(80f, 80f),
+                    inputs = listOf(port(0, "MODEL"))),
+            ),
+            links = listOf(ParsedLink("e", "a", 0, "b", 0, "MODEL")),
+        )
+        // The auto layout's edge will have control points along
+        // y ≈ 50 (port row), spanning x = 80 → 2000. Its
+        // control-point bbox covers (80..2000, ~50). Viewport
+        // (500..1500, 0..200) intersects that bbox at x = 500..1500,
+        // so this edge must survive culling.
+        val plan = buildPlan(
+            graph,
+            visibleBounds = Rect(left = 500f, top = 0f, right = 1500f, bottom = 200f),
+        )
+        assertEquals(
+            1, plan.visibleEdgeCount(),
+            "edge whose control bbox intersects viewport must be kept (per Lily PR #24 review #2)",
+        )
+    }
+
     @Test fun viewport_drops_edges_with_both_endpoints_outside_bounds() {
         val graph = ParsedUiGraph(
             nodes = listOf(
