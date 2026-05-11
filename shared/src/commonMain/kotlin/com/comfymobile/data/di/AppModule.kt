@@ -11,17 +11,21 @@ import com.comfymobile.data.network.ComfyWebSocketClient
 import com.comfymobile.data.network.ConnectionEffectRunner
 import com.comfymobile.data.network.ConnectionStateReducer
 import com.comfymobile.data.network.WebSocketSource
+import com.comfymobile.data.persistence.InMemoryWorkflowRepository
 import com.comfymobile.data.persistence.SettingsServerHistoryStore
 import com.comfymobile.data.persistence.SqlDelightJobRepository
 import com.comfymobile.data.platform.PlatformContext
 import com.comfymobile.data.platform.createSettings
 import com.comfymobile.data.platform.createSqlDriver
 import com.comfymobile.data.platform.nowEpochMs
+import com.comfymobile.data.workflow.WorkflowImporter
 import com.comfymobile.db.ComfyMobileDb
+import com.comfymobile.data.descriptor.NodeDescriptorRegistry
 import com.comfymobile.domain.connection.LifecycleMonitor
 import com.comfymobile.domain.connection.NetworkMonitor
 import com.comfymobile.domain.job.JobRepository
 import com.comfymobile.domain.server.ServerHistoryStore
+import com.comfymobile.domain.workflow.WorkflowRepository
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.plugins.websocket.WebSockets
@@ -79,6 +83,15 @@ fun appModule(): Module = module {
         ComfyMobileDb(driver = createSqlDriver(context))
     }
     single<JobRepository> { SqlDelightJobRepository(db = get()) }
+    single<WorkflowRepository> { InMemoryWorkflowRepository() }
+
+    factory<WorkflowImporter> {
+        WorkflowImporter(
+            repository = get(),
+            nowEpochMs = { nowEpochMs() },
+            descriptorRegistry = runCatching { get<NodeDescriptorRegistry>() }.getOrNull(),
+        )
+    }
 
     single<ServerHistoryStore> {
         val context = get<PlatformContext>()

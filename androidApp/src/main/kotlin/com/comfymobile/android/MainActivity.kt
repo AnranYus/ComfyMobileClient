@@ -1,10 +1,12 @@
 package com.comfymobile.android
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import com.comfymobile.App
+import com.comfymobile.data.importer.AndroidWorkflowImportInbox
 
 /**
  * Single-Activity host. Compose tree lives in
@@ -17,8 +19,15 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        AndroidWorkflowImportInbox.enqueue(intent)
         setContent {
             App()
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        AndroidWorkflowImportInbox.enqueue(intent)
     }
 }
