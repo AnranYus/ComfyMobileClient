@@ -254,7 +254,12 @@ fun rememberGraphPalette(): GraphPalette {
             borderSelectedArgb = scheme.primary.toArgbLong(),
             statusRunningArgb = scheme.primary.toArgbLong(),
             statusDoneArgb = scheme.tertiary.toArgbLong(),
-            statusCachedArgb = scheme.secondary.toArgbLong(),
+            // ⚡ cached → tertiaryContainer (Material 3's standard
+            // "low-saturation tertiary") per @Ores PR #24 thread
+            // msg `7bc86ac5`: the cached node is "quietly complete",
+            // it shouldn't compete visually with the active ✓ done
+            // state.
+            statusCachedArgb = scheme.tertiaryContainer.toArgbLong(),
             statusErrorArgb = scheme.error.toArgbLong(),
             // Type colours stay fixed regardless of theme — desktop
             // ComfyUI does the same. Per @Ores T2.7 §1.4.
