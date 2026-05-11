@@ -50,7 +50,7 @@ data class SummaryEntry(
  * appends a `…N more` line when more than 4 exist. Per-control
  * compact rendering rules per T2.7 §1.3.
  */
-object SummaryEntryResolver {
+object SummaryRowResolver {
 
     /** Maximum visible param rows before we switch to the "more hint" form. */
     const val MAX_VISIBLE_ROWS: Int = 3

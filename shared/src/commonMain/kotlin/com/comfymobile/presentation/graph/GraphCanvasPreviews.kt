@@ -115,6 +115,7 @@ private fun previewPlan(
                 italic = node.classType == "MyCustomFancyNode",
             )
         },
+        graphPalette = palette,
         resolveSummaryRows = { node ->
             // Preview-only mock summary rows so the previews exercise
             // the §1.3 rendering branch without wiring a real

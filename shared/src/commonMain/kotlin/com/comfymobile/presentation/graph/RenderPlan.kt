@@ -192,6 +192,20 @@ object RenderPlanBuilder {
          * accept the [defaultLightForTesting] defaults.
          */
         summaryRowPalette: SummaryRowPalette = SummaryRowPalette.defaultLightForTesting,
+        /**
+         * Theme-derived [GraphPalette] for status-accent colour
+         * computation. Per @Lily PR #24 review (`4422760595`)
+         * blocker 2: must NOT default to
+         * `GraphPalette.defaultLightForTesting` inside the build
+         * loop — that bypasses the production theme palette derived
+         * via `rememberGraphPalette()`. Compose adapter passes the
+         * theme palette in.
+         *
+         * Default is `defaultLightForTesting` only so unit-test
+         * call sites (no theme available) don't have to construct
+         * a palette per test.
+         */
+        graphPalette: GraphPalette = GraphPalette.defaultLightForTesting,
     ): RenderPlan {
         val nodeById = graph.nodes.associateBy { it.id }
         val visibleNodeIds = layoutResult.nodes.entries
@@ -262,7 +276,10 @@ object RenderPlanBuilder {
                                 StatusBadge.ERROR -> NodeRuntimeStatus.ERROR
                                 StatusBadge.NONE -> NodeRuntimeStatus.IDLE
                             },
-                        palette = GraphPalette.defaultLightForTesting,
+                        // Theme-derived palette flows through from
+                        // the caller (Compose: rememberGraphPalette();
+                        // tests: defaultLightForTesting).
+                        palette = graphPalette,
                     ),
                 ),
             )

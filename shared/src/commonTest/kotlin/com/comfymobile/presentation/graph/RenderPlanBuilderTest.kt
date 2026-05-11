@@ -43,6 +43,7 @@ class RenderPlanBuilderTest {
         visibleBounds: Rect? = null,
         runtimeStatus: NodeRuntimeStatus = NodeRuntimeStatus.IDLE,
         resolveSummaryRows: (ParsedNode) -> List<SummaryEntry> = { emptyList() },
+        graphPalette: GraphPalette = palette,
     ): RenderPlan {
         val layout = GraphLayout.layout(graph)
         return RenderPlanBuilder.build(
@@ -50,9 +51,9 @@ class RenderPlanBuilderTest {
             layoutResult = layout,
             resolveStyle = { _ ->
                 NodeStyle(
-                    fillArgb = palette.nodeFillArgb,
-                    titleArgb = palette.titleArgb,
-                    borderArgb = palette.borderArgb,
+                    fillArgb = graphPalette.nodeFillArgb,
+                    titleArgb = graphPalette.titleArgb,
+                    borderArgb = graphPalette.borderArgb,
                     borderWidthDp = 1f,
                     statusBadge = when (runtimeStatus) {
                         NodeRuntimeStatus.IDLE -> StatusBadge.NONE
@@ -65,10 +66,11 @@ class RenderPlanBuilderTest {
                     showSelected = false,
                 )
             },
-            resolvePortStyle = { p -> NodeStyleResolver.resolvePort(p, palette) },
+            resolvePortStyle = { p -> NodeStyleResolver.resolvePort(p, graphPalette) },
             resolveTitle = { n -> NodeTitleSpec(n.classType, italic = bodyMode == BodyMode.TITLE_ONLY) },
             resolveSummaryRows = resolveSummaryRows,
             visibleBounds = visibleBounds,
+            graphPalette = graphPalette,
         )
     }
 
@@ -301,6 +303,28 @@ class RenderPlanBuilderTest {
         val deltas = ys.zipWithNext { a, b -> b - a }
         assertEquals(1, deltas.toSet().size, "row pitch should be constant, got deltas: $deltas")
         assertTrue(deltas.single() > 0f, "rows should advance downward")
+    }
+
+    @Test fun status_accent_uses_caller_provided_palette_not_default_for_testing() {
+        // Per @Lily PR #24 review (`4422760595`) blocker 2: the
+        // status-accent colour in DrawCommand.NodeTitle must come from
+        // the *caller-provided* graphPalette, NOT a hard-coded
+        // GraphPalette.defaultLightForTesting reference. Otherwise the
+        // production Compose theme palette (built via
+        // rememberGraphPalette()) gets ignored and dark mode / dynamic
+        // colour stop working.
+        //
+        // We pass a palette with a deliberately-unique
+        // statusRunningArgb and assert it flows through.
+        val customPalette = palette.copy(statusRunningArgb = 0xFF112233)
+        val graph = ParsedUiGraph(nodes = listOf(node("n")), links = emptyList())
+        val plan = buildPlan(
+            graph,
+            runtimeStatus = NodeRuntimeStatus.RUNNING,
+            graphPalette = customPalette,
+        )
+        val title = plan.commands.filterIsInstance<DrawCommand.NodeTitle>().single()
+        assertEquals(0xFF112233, title.statusAccentArgb)
     }
 
     @Test fun title_only_node_does_NOT_emit_summary_rows() {
