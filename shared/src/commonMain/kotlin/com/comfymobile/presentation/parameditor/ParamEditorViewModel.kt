@@ -21,6 +21,8 @@ class ParamEditorViewModel(
     val state: StateFlow<ParamEditorScreenState> = mutableState.asStateFlow()
 
     private var sourceEnvelope: WorkflowEnvelope? = null
+    private var editorGeneration: Long = 0L
+    private var optionLoadGeneration: Long = 0L
 
     fun actions(): ParamEditorActions = ParamEditorActions(
         onOpen = ::open,
@@ -40,6 +42,8 @@ class ParamEditorViewModel(
     )
 
     fun open(envelope: WorkflowEnvelope, nodeId: String) {
+        editorGeneration += 1
+        val generation = editorGeneration
         sourceEnvelope = envelope
         when (val result = ParamEditorCore.open(envelope, nodeId, registry, language)) {
             is ParamEditorOpenResult.Ready -> {
@@ -47,7 +51,7 @@ class ParamEditorViewModel(
                     editor = result.state,
                     language = language,
                 )
-                loadOptions()
+                loadOptions(generation)
             }
             ParamEditorOpenResult.NodeNotFound -> {
                 mutableState.value = ParamEditorScreenState(
@@ -116,7 +120,14 @@ class ParamEditorViewModel(
     }
 
     fun loadOptions() {
+        loadOptions(editorGeneration)
+    }
+
+    private fun loadOptions(generation: Long) {
         val editor = mutableState.value.editor ?: return
+        val optionGeneration = ++optionLoadGeneration
+        val nodeId = editor.nodeId
+        val classType = editor.nodeClassType
         editor.rows
             .mapNotNull { row ->
                 val source = row.param.control.sourceOrNull() ?: return@mapNotNull null
@@ -135,6 +146,14 @@ class ParamEditorViewModel(
                 scope.launch {
                     val result = optionProvider.load(request)
                     val currentEditor = mutableState.value.editor ?: return@launch
+                    if (
+                        generation != editorGeneration ||
+                        optionGeneration != optionLoadGeneration ||
+                        currentEditor.nodeId != nodeId ||
+                        currentEditor.nodeClassType != classType
+                    ) {
+                        return@launch
+                    }
                     mutableState.value = mutableState.value.copy(
                         editor = result.fold(
                             onSuccess = { ParamEditorCore.setOptionsLoaded(currentEditor, paramName, it) },
@@ -156,6 +175,7 @@ class ParamEditorViewModel(
         mutableState.value = if (editor.isDirty) {
             mutableState.value.copy(editor = editor.copy(confirmDiscardVisible = true))
         } else {
+            editorGeneration += 1
             mutableState.value.copy(editor = null)
         }
     }
@@ -175,6 +195,7 @@ class ParamEditorViewModel(
     }
 
     fun onDiscard() {
+        editorGeneration += 1
         mutableState.value = mutableState.value.copy(editor = null)
     }
 
@@ -183,6 +204,7 @@ class ParamEditorViewModel(
         val editor = mutableState.value.editor ?: return
         when (val result = ParamEditorCore.apply(envelope, editor, nowEpochMs())) {
             is ParamEditorApplyResult.Applied -> {
+                editorGeneration += 1
                 sourceEnvelope = result.envelope
                 mutableState.value = mutableState.value.copy(
                     editor = null,
@@ -196,6 +218,7 @@ class ParamEditorViewModel(
                 )
             }
             ParamEditorApplyResult.NotDirty -> {
+                editorGeneration += 1
                 mutableState.value = mutableState.value.copy(editor = null)
             }
         }

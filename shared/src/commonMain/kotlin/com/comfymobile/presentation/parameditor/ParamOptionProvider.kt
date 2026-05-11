@@ -9,6 +9,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.coroutines.CancellationException
 
 fun interface ParamOptionProvider {
     suspend fun load(request: ParamOptionRequest): Result<List<ParamOption>>
@@ -29,12 +30,18 @@ class ComfyParamOptionProvider(
 ) : ParamOptionProvider {
 
     override suspend fun load(request: ParamOptionRequest): Result<List<ParamOption>> =
-        runCatching {
-            when (val source = request.source) {
+        try {
+            Result.success(
+                when (val source = request.source) {
                 is Source.NodeEnumFromObjectInfo -> loadNodeEnum(request, source)
                 is Source.ModelFolder -> httpClient.getModels(source.folder).map { ParamOption(it) }
                 Source.EmbeddingsList -> httpClient.getEmbeddings().map { ParamOption(it) }
-            }
+                }
+            )
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            Result.failure(t)
         }
 
     private suspend fun loadNodeEnum(

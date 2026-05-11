@@ -4,6 +4,7 @@ import com.comfymobile.data.descriptor.NodeDescriptorRegistry
 import com.comfymobile.domain.workflow.WorkflowEnvelope
 import com.comfymobile.domain.workflow.WorkflowFormat
 import com.comfymobile.domain.workflow.WorkflowMetadata
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -85,6 +86,37 @@ class ParamEditorViewModelTest {
         assertEquals(false, vm.state.value.editor!!.isDirty)
     }
 
+    @Test fun stale_option_result_after_switching_nodes_is_ignored() = runTest {
+        val first = CompletableDeferred<Result<List<ParamOption>>>()
+        val second = CompletableDeferred<Result<List<ParamOption>>>()
+        var calls = 0
+        val vm = viewModel(
+            optionProvider = ParamOptionProvider {
+                calls += 1
+                if (calls == 1) first.await() else second.await()
+            },
+            scope = this,
+        )
+
+        vm.open(workflow(nodeId = 1), "1")
+        runCurrent()
+        vm.open(workflow(nodeId = 2), "2")
+        runCurrent()
+
+        first.complete(Result.success(listOf(ParamOption("stale-from-node-1"))))
+        runCurrent()
+
+        val afterStale = vm.state.value.editor!!.rows.first { it.param.name == "sampler_name" }
+        assertIs<ParamOptionsState.Loading>(afterStale.options)
+
+        second.complete(Result.success(listOf(ParamOption("fresh-from-node-2"))))
+        runCurrent()
+
+        val afterFresh = vm.state.value.editor!!.rows.first { it.param.name == "sampler_name" }
+        val loaded = assertIs<ParamOptionsState.Loaded>(afterFresh.options)
+        assertEquals(listOf("fresh-from-node-2"), loaded.options.map { it.value })
+    }
+
     private fun viewModel(
         optionProvider: ParamOptionProvider,
         scope: CoroutineScope,
@@ -97,14 +129,14 @@ class ParamEditorViewModelTest {
             nextSeed = { 123L },
         )
 
-    private fun workflow(): WorkflowEnvelope =
+    private fun workflow(nodeId: Int = 1): WorkflowEnvelope =
         WorkflowEnvelope(
             original = json.parseToJsonElement(
                 """
                 {
                   "nodes": [
                     {
-                      "id": 1,
+                      "id": $nodeId,
                       "type": "KSampler",
                       "widgets_values": [12345, "randomize", 20, 7.5, "euler", "normal", 1.0]
                     }
