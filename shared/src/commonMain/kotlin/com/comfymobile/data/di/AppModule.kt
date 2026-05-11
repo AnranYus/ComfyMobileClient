@@ -21,11 +21,17 @@ import com.comfymobile.data.platform.nowEpochMs
 import com.comfymobile.data.workflow.WorkflowImporter
 import com.comfymobile.db.ComfyMobileDb
 import com.comfymobile.data.descriptor.NodeDescriptorRegistry
+import com.comfymobile.data.image.ComfyImageMapper
+import com.comfymobile.data.image.PreviewFormat
+import com.comfymobile.data.image.PreviewSpec
 import com.comfymobile.domain.connection.LifecycleMonitor
 import com.comfymobile.domain.connection.NetworkMonitor
 import com.comfymobile.domain.job.JobRepository
 import com.comfymobile.domain.server.ServerHistoryStore
 import com.comfymobile.domain.workflow.WorkflowRepository
+import com.comfymobile.presentation.history.ComfyHistoryThumbnailMapper
+import com.comfymobile.presentation.history.HistoryThumbnailMapper
+import com.comfymobile.presentation.history.HistoryViewModel
 import com.comfymobile.presentation.parameditor.ActiveServerParamOptionProvider
 import com.comfymobile.presentation.parameditor.ParamEditorViewModel
 import com.comfymobile.presentation.parameditor.ParamOptionProvider
@@ -102,6 +108,19 @@ fun appModule(): Module = module {
             httpClientFactory = { server ->
                 get<ComfyHttpClient> { org.koin.core.parameter.parametersOf(server.baseUrl) }
             },
+        )
+    }
+
+    single<HistoryThumbnailMapper> {
+        val activeServerHolder = get<ActiveServerHolder>()
+        ComfyHistoryThumbnailMapper(
+            imageMapper = ComfyImageMapper(
+                activeBaseUrlProvider = { activeServerHolder.current.value?.baseUrl },
+                defaultPreview = PreviewSpec(
+                    format = PreviewFormat.JPEG,
+                    quality = 80,
+                ),
+            ),
         )
     }
 
@@ -251,6 +270,16 @@ fun appModule(): Module = module {
             optionProvider = get(),
             scope = vmScope,
             nowEpochMs = { nowEpochMs() },
+        )
+    }
+
+    factory<HistoryViewModel> { (vmScope: CoroutineScope) ->
+        HistoryViewModel(
+            repository = get(),
+            activeServer = get(),
+            scope = vmScope,
+            nowEpochMs = { nowEpochMs() },
+            thumbnailMapper = get(),
         )
     }
 }

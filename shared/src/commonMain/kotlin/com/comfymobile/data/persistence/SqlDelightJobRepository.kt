@@ -5,6 +5,7 @@ import app.cash.sqldelight.coroutines.mapToList
 import com.comfymobile.db.ComfyMobileDb
 import com.comfymobile.db.JobIndex
 import com.comfymobile.domain.job.Job
+import com.comfymobile.domain.job.JobOutputRef
 import com.comfymobile.domain.job.JobRepository
 import com.comfymobile.domain.job.JobStatus
 import kotlinx.coroutines.CoroutineDispatcher
@@ -46,6 +47,9 @@ class SqlDelightJobRepository(
             workflow_snapshot_json = job.workflowSnapshotJson,
             api_prompt_json = job.apiPromptJson,
             label = job.label,
+            first_output_filename = job.firstOutput?.filename,
+            first_output_subfolder = job.firstOutput?.subfolder,
+            first_output_type = job.firstOutput?.type,
             created_at = job.createdAtEpochMs,
             finished_at = job.finishedAtEpochMs,
         )
@@ -59,6 +63,25 @@ class SqlDelightJobRepository(
         queries.updateStatus(
             status = status.wireValue,
             finished_at = finishedAtEpochMs,
+            prompt_id = promptId,
+        )
+    }
+
+    override suspend fun updateLabel(promptId: String, label: String?) = withContext(ioDispatcher) {
+        queries.updateLabel(
+            label = label,
+            prompt_id = promptId,
+        )
+    }
+
+    override suspend fun updateFirstOutput(
+        promptId: String,
+        firstOutput: JobOutputRef?,
+    ) = withContext(ioDispatcher) {
+        queries.updateFirstOutput(
+            first_output_filename = firstOutput?.filename,
+            first_output_subfolder = firstOutput?.subfolder,
+            first_output_type = firstOutput?.type,
             prompt_id = promptId,
         )
     }
@@ -95,6 +118,10 @@ class SqlDelightJobRepository(
         queries.deleteByServer(serverId)
     }
 
+    override suspend fun deleteByPromptId(promptId: String) = withContext(ioDispatcher) {
+        queries.deleteByPromptId(promptId)
+    }
+
     override suspend fun deleteAll() = withContext(ioDispatcher) {
         queries.deleteAll()
     }
@@ -106,6 +133,13 @@ class SqlDelightJobRepository(
         workflowSnapshotJson = workflow_snapshot_json,
         apiPromptJson = api_prompt_json,
         label = label,
+        firstOutput = first_output_filename?.let { filename ->
+            JobOutputRef(
+                filename = filename,
+                subfolder = first_output_subfolder.orEmpty(),
+                type = first_output_type ?: JobOutputRef.TYPE_OUTPUT,
+            )
+        },
         createdAtEpochMs = created_at,
         finishedAtEpochMs = finished_at,
     )
