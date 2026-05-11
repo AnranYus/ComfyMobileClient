@@ -3,6 +3,7 @@ package com.comfymobile.presentation.graph
 import com.comfymobile.domain.node.ControlType
 import com.comfymobile.domain.node.NodeDescriptor
 import com.comfymobile.domain.node.ParamDescriptor
+import com.comfymobile.domain.workflow.WorkflowWidgetValueIndex
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -68,9 +69,17 @@ object SummaryRowResolver {
         val params = descriptor.editableParams
         if (params.isEmpty()) return emptyList()
 
-        val rows = params.take(MAX_VISIBLE_ROWS).mapIndexed { index, param ->
+        val rows = params.take(MAX_VISIBLE_ROWS).map { param ->
+            val widgetIndex = WorkflowWidgetValueIndex.indexOf(
+                classType = node.classType,
+                descriptor = descriptor,
+                param = param,
+            )
             SummaryEntry(
-                text = formatParamRow(param = param, valueAtSlot = node.widgetsValues.getOrNull(index)),
+                text = formatParamRow(
+                    param = param,
+                    valueAtSlot = widgetIndex?.let { node.widgetsValues.getOrNull(it) },
+                ),
                 emphasis = SummaryEntry.Emphasis.PARAM,
             )
         }
