@@ -84,7 +84,6 @@ class RunViewModelTest {
 
     private val testServer = ServerInfo(
         serverId = "127.0.0.1:8188",
-                baseUrl = "http://127.0.0.1:8188",
         host = "127.0.0.1",
         port = 8188,
         label = "Local",
