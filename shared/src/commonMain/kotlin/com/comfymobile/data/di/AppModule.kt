@@ -18,6 +18,9 @@ import com.comfymobile.data.platform.PlatformContext
 import com.comfymobile.data.platform.createSettings
 import com.comfymobile.data.platform.createSqlDriver
 import com.comfymobile.data.platform.nowEpochMs
+import com.comfymobile.data.run.ActiveServerCancelPort
+import com.comfymobile.data.run.ActiveServerPromptPort
+import com.comfymobile.data.run.ActiveServerWsEventPort
 import com.comfymobile.data.workflow.WorkflowImporter
 import com.comfymobile.db.ComfyMobileDb
 import com.comfymobile.data.descriptor.NodeDescriptorRegistry
@@ -28,7 +31,13 @@ import com.comfymobile.data.image.createComfyImageLoader
 import com.comfymobile.domain.connection.LifecycleMonitor
 import com.comfymobile.domain.connection.NetworkMonitor
 import com.comfymobile.domain.job.JobRepository
+import com.comfymobile.domain.run.CancelPort
+import com.comfymobile.domain.run.Clock
+import com.comfymobile.domain.run.PromptSubmissionPort
+import com.comfymobile.domain.run.RunCoordinator
+import com.comfymobile.domain.run.WsEventPort
 import com.comfymobile.domain.server.ServerHistoryStore
+import com.comfymobile.domain.workflow.WorkflowConverter
 import com.comfymobile.domain.workflow.WorkflowRepository
 import com.comfymobile.presentation.history.ComfyHistoryThumbnailMapper
 import com.comfymobile.presentation.history.HistoryThumbnailMapper
@@ -39,6 +48,7 @@ import com.comfymobile.presentation.gallery.OutputGalleryViewModel
 import com.comfymobile.presentation.parameditor.ActiveServerParamOptionProvider
 import com.comfymobile.presentation.parameditor.ParamEditorViewModel
 import com.comfymobile.presentation.parameditor.ParamOptionProvider
+import com.comfymobile.presentation.run.RunViewModel
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.plugins.websocket.WebSockets
@@ -305,6 +315,66 @@ fun appModule(): Module = module {
             ),
             jobRepository = get(),
             actionGateway = get(),
+            scope = vmScope,
+        )
+    }
+
+    // ----------------------------------------------------------------- T2.3 run-loop wiring
+    //
+    // Active-server-aware adapters: each call snapshots the current
+    // baseUrl from ActiveServerHolder and asks the per-server factory
+    // for a fresh client. Per @Lily T2.3 review pattern: tests inject
+    // RunCoordinator with fakes; production code goes through these
+    // singletons. RunCoordinator is a singleton because there is one
+    // logical "active run" per process; concurrent runs are rejected
+    // by its internal mutex.
+
+    single<PromptSubmissionPort> {
+        ActiveServerPromptPort(
+            activeServer = get(),
+            httpClientFactory = { baseUrl ->
+                get<ComfyHttpClient> { org.koin.core.parameter.parametersOf(baseUrl) }
+            },
+        )
+    }
+
+    single<CancelPort> {
+        ActiveServerCancelPort(
+            activeServer = get(),
+            httpClientFactory = { baseUrl ->
+                get<ComfyHttpClient> { org.koin.core.parameter.parametersOf(baseUrl) }
+            },
+        )
+    }
+
+    single<WsEventPort> {
+        ActiveServerWsEventPort(
+            activeServer = get(),
+            webSocketSourceFactory = { baseUrl ->
+                get<WebSocketSource> { org.koin.core.parameter.parametersOf(baseUrl) }
+            },
+        )
+    }
+
+    single<Clock> { Clock { nowEpochMs() } }
+
+    single<RunCoordinator> {
+        RunCoordinator(
+            prompt = get(),
+            cancel = get(),
+            ws = get(),
+            converter = WorkflowConverter(),
+            jobs = get(),
+            clock = get(),
+        )
+    }
+
+    factory<RunViewModel> { (vmScope: CoroutineScope) ->
+        RunViewModel(
+            coordinator = get(),
+            activeServer = get(),
+            connectionState = get<ConnectionStateMachineFacade>().currentState,
+            clientId = CLIENT_ID_PER_PROCESS,
             scope = vmScope,
         )
     }
