@@ -85,6 +85,16 @@ class InMemoryJobRepositoryTest {
         assertEquals(JobStatus.QUEUED, out.status)
     }
 
+    @Test fun updateFavorite_mutates_only_favorite_flag() = runTest {
+        val repo = InMemoryJobRepository()
+        repo.upsert(job(promptId = "p-1", status = JobStatus.SUCCEEDED, createdAt = 1000L))
+        repo.updateFavorite("p-1", true)
+        val out = repo.getByPromptId("p-1")!!
+        assertEquals(true, out.isFavorite)
+        assertEquals(JobStatus.SUCCEEDED, out.status)
+        assertEquals(1000L, out.createdAtEpochMs)
+    }
+
     @Test fun listByServer_orders_by_createdAt_descending() = runTest {
         val repo = InMemoryJobRepository()
         repo.upsert(job(promptId = "p-1", createdAt = 1000L))

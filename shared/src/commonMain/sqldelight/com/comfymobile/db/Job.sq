@@ -46,6 +46,11 @@ CREATE TABLE jobIndex (
     first_output_subfolder TEXT,
     first_output_type TEXT,
 
+    -- User-controlled marker used by the output gallery / history
+    -- surface. This is local-only metadata; it never deletes or
+    -- modifies files on the ComfyUI server.
+    is_favorite INTEGER NOT NULL DEFAULT 0,
+
     -- Unix milliseconds. created_at is set when we first record the
     -- submission attempt; finished_at is set once the row reaches a
     -- terminal status (succeeded / failed / interrupted).
@@ -72,8 +77,9 @@ INSERT OR REPLACE INTO jobIndex(
     workflow_snapshot_json, api_prompt_json,
     label,
     first_output_filename, first_output_subfolder, first_output_type,
+    is_favorite,
     created_at, finished_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 updateStatus:
 UPDATE jobIndex SET status = ?, finished_at = ? WHERE prompt_id = ?;
@@ -87,6 +93,9 @@ SET first_output_filename = ?,
     first_output_subfolder = ?,
     first_output_type = ?
 WHERE prompt_id = ?;
+
+updateFavorite:
+UPDATE jobIndex SET is_favorite = ? WHERE prompt_id = ?;
 
 selectByPromptId:
 SELECT * FROM jobIndex WHERE prompt_id = ?;

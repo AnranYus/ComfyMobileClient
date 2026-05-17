@@ -64,6 +64,7 @@ data class Job(
     val apiPromptJson: String? = null,
     val label: String? = null,
     val firstOutput: JobOutputRef? = null,
+    val isFavorite: Boolean = false,
     val createdAtEpochMs: Long,
     val finishedAtEpochMs: Long? = null,
 )

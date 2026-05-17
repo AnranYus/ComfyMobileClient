@@ -50,6 +50,7 @@ class SqlDelightJobRepository(
             first_output_filename = job.firstOutput?.filename,
             first_output_subfolder = job.firstOutput?.subfolder,
             first_output_type = job.firstOutput?.type,
+            is_favorite = job.isFavorite.asSqlLong(),
             created_at = job.createdAtEpochMs,
             finished_at = job.finishedAtEpochMs,
         )
@@ -82,6 +83,13 @@ class SqlDelightJobRepository(
             first_output_filename = firstOutput?.filename,
             first_output_subfolder = firstOutput?.subfolder,
             first_output_type = firstOutput?.type,
+            prompt_id = promptId,
+        )
+    }
+
+    override suspend fun updateFavorite(promptId: String, isFavorite: Boolean) = withContext(ioDispatcher) {
+        queries.updateFavorite(
+            is_favorite = isFavorite.asSqlLong(),
             prompt_id = promptId,
         )
     }
@@ -140,7 +148,10 @@ class SqlDelightJobRepository(
                 type = first_output_type ?: JobOutputRef.TYPE_OUTPUT,
             )
         },
+        isFavorite = is_favorite != 0L,
         createdAtEpochMs = created_at,
         finishedAtEpochMs = finished_at,
     )
+
+    private fun Boolean.asSqlLong(): Long = if (this) 1L else 0L
 }
