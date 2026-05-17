@@ -73,10 +73,35 @@ class RunCoordinator(
     private val converter: WorkflowConverter,
     private val jobs: JobRepository,
     private val clock: Clock,
+    /**
+     * After the WS event stream errors or completes WITHOUT a terminal
+     * event, how long to keep the reducer alive waiting for a
+     * reconciled terminal (e.g. from the B/C `/history` reconciler).
+     * Past this window, the coordinator synthesises a
+     * `Failure(Network)` terminal so the user isn't stuck on a
+     * permanent "running" indicator. Default 60s covers B-branch
+     * 30s + a comfortable buffer for the reconciler's last probe to
+     * complete (per @Lily PR #34 review msg `4996df44` blocker 1).
+     */
+    private val reconciliationGraceMs: Long = 60_000L,
 ) {
 
     private val _state = MutableStateFlow<RunState>(RunState.Idle)
     val state: StateFlow<RunState> = _state.asStateFlow()
+
+    /**
+     * Public read-only view of the **currently active run's** server
+     * context (or null when no run is in flight). Used by side-channel
+     * reconcilers that need to issue `/history/{prompt_id}` probes
+     * against the SAME server the run was submitted on, regardless of
+     * the user's current active-server selection.
+     *
+     * Mirrors [activeCancelChannel] but does not leak the cancel
+     * channel itself — callers should only need promptId + baseUrl
+     * for HTTP probes.
+     */
+    private val _activeRunContext = MutableStateFlow<ActiveRunContext?>(null)
+    val activeRunContext: StateFlow<ActiveRunContext?> = _activeRunContext.asStateFlow()
 
     /**
      * Mutex guarding the "one run at a time" invariant. Held for the
@@ -171,11 +196,58 @@ class RunCoordinator(
                 // cancel channel was published before state = Queued so
                 // it is guaranteed visible by the time we get here (per
                 // @Lily PR #30 race fix, msg `42ee1862`).
-                slot.channel.trySend(Terminal.Cancelled(fromNodeId = null))
+                slot.channel.trySend(
+                    MachineInput.Force(Terminal.Cancelled(fromNodeId = null))
+                )
                 CancelRoute.DeleteQueued(current.promptId)
             }
             else -> null
         }
+    }
+
+    /**
+     * Inject a reconciled terminal observed from a side-channel (e.g.
+     * `/history/{prompt_id}` probe after a network drop or background
+     * resume) into the active run.
+     *
+     * Returns true when the reconciliation was applied — meaning a run
+     * is currently in flight for [promptId] and the reducer accepted
+     * the signal. Returns false when:
+     *  - No active run (idle/terminal coordinator state).
+     *  - Active run is for a different promptId.
+     *  - Reducer already has a terminal (the existing snapshot.terminal
+     *    guard in [driveWsLifecycle] suppresses the apply — terminal is
+     *    authoritative).
+     *
+     * Per @Lily T2.3 follow-up gate 3 (msg `39168de4`):
+     * reconciliation must NOT override a RunState that has already
+     * reached terminal.
+     *
+     * [outputs] is plumbed into the snapshot so a Succeeded reconciliation
+     * still has image refs to surface in the gallery. For Failed /
+     * Cancelled reconciliation, pass an empty list.
+     */
+    suspend fun applyReconciledTerminal(
+        promptId: String,
+        outcome: ReconciledOutcome,
+    ): Boolean {
+        val slot = activeCancelChannel.value ?: return false
+        if (slot.promptId != promptId) return false
+        val terminal = when (outcome) {
+            is ReconciledOutcome.Succeeded -> Terminal.Success
+            is ReconciledOutcome.Failed -> Terminal.Failure(outcome.error)
+            ReconciledOutcome.Interrupted -> Terminal.Cancelled(fromNodeId = null)
+        }
+        val reconciledOutputs = when (outcome) {
+            is ReconciledOutcome.Succeeded -> outcome.outputs
+            else -> emptyList()
+        }
+        return slot.channel.trySend(
+            MachineInput.Reconciled(
+                terminal = terminal,
+                reconciledOutputs = reconciledOutputs,
+            )
+        ).isSuccess
     }
 
     // ----------------------------------------------------------------- internals
@@ -220,11 +292,19 @@ class RunCoordinator(
         //    immediately calls requestCancel MUST be able to find a
         //    working channel — otherwise the cancel signal is lost. Per
         //    @Lily PR #30 race blocker, msg `42ee1862`.
-        val cancelChannel = Channel<Terminal>(capacity = 1)
+        // Capacity 2 so requestCancel (Force) and an out-of-band
+        // reconciler (Reconciled) can both buffer a signal even if the
+        // reducer hasn't yet drained the first.
+        val cancelChannel = Channel<MachineInput>(capacity = 2)
         activeCancelChannel.value = ActiveCancelChannel(
             promptId = response.prompt_id,
             baseUrl = submission.baseUrl,
             channel = cancelChannel,
+        )
+        _activeRunContext.value = ActiveRunContext(
+            promptId = response.prompt_id,
+            baseUrl = submission.baseUrl,
+            serverId = submission.serverId,
         )
 
         try {
@@ -285,6 +365,7 @@ class RunCoordinator(
             // by which point state is terminal and requestCancel would be
             // a no-op anyway.
             activeCancelChannel.value = null
+            _activeRunContext.value = null
             cancelChannel.close()
         }
     }
@@ -337,7 +418,7 @@ class RunCoordinator(
         baseUrl: String,
         clientId: String,
         serverId: String,
-        cancelChannel: Channel<Terminal>,
+        cancelChannel: Channel<MachineInput>,
     ): RunState = coroutineScope {
         val inputs = Channel<MachineInput>(capacity = Channel.UNLIMITED)
 
@@ -363,13 +444,45 @@ class RunCoordinator(
         // when forceJob enters its iteration. There is no subscribe-gap
         // race because Channel decouples send from receive.
         val forceJob = launch {
-            for (terminal in cancelChannel) {
-                inputs.trySend(MachineInput.Force(terminal))
+            for (input in cancelChannel) {
+                inputs.trySend(input)
             }
         }
 
         var snapshot = MachineSnapshot(promptId = promptId)
         var wsError: Throwable? = null
+        // Explicitly fully-qualified to avoid a name clash with
+        // [com.comfymobile.domain.job.Job] (the data class) imported
+        // earlier in this file.
+        var graceJob: kotlinx.coroutines.Job? = null
+
+        // After WS loss, we don't finalize immediately. Per @Lily PR
+        // #34 review msg `4996df44` blocker 1: the B/C `/history`
+        // reconciler needs the coordinator to STAY active so it can
+        // deliver a Reconciled terminal. We arm a single grace timer
+        // when the WS first drops; if no terminal (reconciled or
+        // otherwise) arrives within the grace window, the timer
+        // synthesises Force(Failure(Network)) so the run still
+        // terminates and the user isn't stuck on a permanent
+        // "running" indicator.
+        fun armGraceTimerIfNotArmed(causeFromWs: Throwable?) {
+            if (graceJob != null) return
+            graceJob = launch {
+                kotlinx.coroutines.delay(reconciliationGraceMs)
+                inputs.trySend(
+                    MachineInput.Force(
+                        Terminal.Failure(
+                            RunError.Network(
+                                causeFromWs
+                                    ?: IllegalStateException(
+                                        "WS closed and no reconciliation within ${reconciliationGraceMs}ms"
+                                    )
+                            )
+                        )
+                    )
+                )
+            }
+        }
 
         try {
             for (input in inputs) {
@@ -379,18 +492,39 @@ class RunCoordinator(
                         snapshot = next
                     }
                     is MachineInput.Force -> {
+                        // Idempotency: if a terminal was already set
+                        // (e.g. by reconciliation), the grace timer's
+                        // synthetic Force should not override.
+                        if (snapshot.terminal != null) continue
                         snapshot = snapshot.copy(terminal = input.terminal)
                     }
+                    is MachineInput.Reconciled -> {
+                        // Reconciled terminals from a side-channel
+                        // (e.g. /history probe after a network drop)
+                        // inject outputs along with the terminal so a
+                        // Succeeded case still has the outputs to
+                        // surface. The snapshot.terminal-already-set
+                        // guard prevents overriding a real server-
+                        // driven terminal that arrived first.
+                        if (snapshot.terminal != null) continue
+                        val outputs = snapshot.outputs + input.reconciledOutputs.filter { ref ->
+                            snapshot.outputs.none { it.filename == ref.filename && it.subfolder == ref.subfolder && it.type == ref.type }
+                        }
+                        snapshot = snapshot.copy(
+                            terminal = input.terminal,
+                            outputs = outputs,
+                            firstOutput = snapshot.firstOutput ?: outputs.firstOrNull(),
+                        )
+                    }
                     is MachineInput.WsCompleted -> {
-                        // Server closed /ws politely without a terminal event.
-                        // Fall through to the post-loop "no terminal" branch
-                        // which finalizes as Failed(Network).
-                        if (snapshot.terminal == null) break
+                        // Don't break the loop. Arm grace timer and
+                        // keep listening for Reconciled / Force.
+                        if (snapshot.terminal == null) armGraceTimerIfNotArmed(causeFromWs = null)
                         continue
                     }
                     is MachineInput.WsError -> {
                         wsError = input.cause
-                        if (snapshot.terminal == null) break
+                        if (snapshot.terminal == null) armGraceTimerIfNotArmed(causeFromWs = input.cause)
                         continue
                     }
                 }
@@ -402,10 +536,11 @@ class RunCoordinator(
                 }
             }
         } finally {
-            // Cancel both fan-in jobs before returning so they don't
-            // keep collecting after we've decided on a terminal.
+            // Cancel all fan-in / timer jobs before returning so they
+            // don't keep collecting after we've decided on a terminal.
             wsJob.cancel()
             forceJob.cancel()
+            graceJob?.cancel()
             inputs.close()
         }
 
@@ -518,6 +653,46 @@ sealed interface CancelRoute {
     data class DeleteQueued(val promptId: String) : CancelRoute
 }
 
+/**
+ * Server context for the currently active run. Published by
+ * [RunCoordinator.activeRunContext] so out-of-band consumers (e.g. the
+ * B/C reconciliation layer) can address the SAME server the run was
+ * submitted on, regardless of the user's current active-server choice.
+ *
+ * Always cleared to null in the coordinator's `finally` block, so a
+ * read of `activeRunContext.value` never sees a stale context after a
+ * run has wound up.
+ */
+data class ActiveRunContext(
+    val promptId: String,
+    val baseUrl: String,
+    val serverId: String,
+)
+
+/**
+ * Outcome of a side-channel reconciliation probe (e.g.
+ * `/history/{prompt_id}` after a network drop). Passed to
+ * [RunCoordinator.applyReconciledTerminal] to settle an active run
+ * whose WS event stream was lost.
+ *
+ * The discriminators mirror ComfyUI's `history.status.status_str`:
+ *  - `"success"` → [Succeeded]
+ *  - `"error"`   → [Failed]
+ *  - `"interrupted"` → [Interrupted]
+ * with [outputs] populated from the `outputs` payload for Succeeded.
+ */
+sealed interface ReconciledOutcome {
+
+    /** Server reports the run completed successfully. */
+    data class Succeeded(val outputs: List<JobOutputRef>) : ReconciledOutcome
+
+    /** Server reports the run failed; [error] carries the typed cause. */
+    data class Failed(val error: RunError) : ReconciledOutcome
+
+    /** Server reports the run was interrupted (user or server cancel). */
+    data object Interrupted : ReconciledOutcome
+}
+
 // -------------------------------------------------------------------- pure state machine
 
 /**
@@ -559,6 +734,20 @@ internal sealed interface Terminal {
 internal sealed interface MachineInput {
     data class WsFrame(val event: WsEvent) : MachineInput
     data class Force(val terminal: Terminal) : MachineInput
+    /**
+     * Reconciled terminal from a side-channel (e.g. /history probe
+     * after a network drop). Carries final outputs because Succeeded
+     * needs them and the WS-driven path won't deliver them anymore.
+     * Per @Lily T2.3 follow-up gate 3 (msg `39168de4`): reconciliation
+     * applies only to in-flight states; the coordinator's existing
+     * snapshot.terminal check guards against re-applying after a
+     * server-driven terminal has already arrived.
+     */
+    data class Reconciled(
+        val terminal: Terminal,
+        val reconciledOutputs: List<JobOutputRef>,
+    ) : MachineInput
+
     data object WsCompleted : MachineInput
     data class WsError(val cause: Throwable) : MachineInput
 }
@@ -577,7 +766,7 @@ internal sealed interface MachineInput {
 internal data class ActiveCancelChannel(
     val promptId: String,
     val baseUrl: String,
-    val channel: Channel<Terminal>,
+    val channel: Channel<MachineInput>,
 )
 
 /**
