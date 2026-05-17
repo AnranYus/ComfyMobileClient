@@ -5,6 +5,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
@@ -46,14 +47,20 @@ import org.koin.core.parameter.parametersOf
  * [com.comfymobile.domain.run.RunCoordinator] directly for navigation
  * (per @Lily T2.3 follow-up gate 1, msg `39168de4`).
  *
- * **Replay protection** (per @Lily PR #32 review msg `5a73db76` blocker
- * 1): on entry, the route captures the singleton coordinator's
- * currently-displayed Succeeded promptId (if any) as a baseline. The
- * route IGNORES that baseline promptId and fires `onSuccess` only for
- * a promptId that differs from it. Without this, navigating away after
- * a successful run and re-entering RunRoute would immediately bounce
- * the user back to the gallery without a real new submission, because
- * the coordinator (a singleton) still carries the prior Succeeded.
+ * **Replay protection** (per @Lily PR #32 review msgs `5a73db76` and
+ * `cac2df31`): the route binds navigation strictly to a successful
+ * submit dispatched FROM THIS route instance, not to any incoming
+ * `Succeeded` state. An internal `submittedInThisRoute` flag is armed
+ * by [RunIntents.submit] when the user taps Run; the `onSuccess`
+ * dispatch consumes the flag exactly once. This guarantees:
+ *  - Re-entering RunRoute after a previous successful run no longer
+ *    bounces the user back to the gallery (the singleton coordinator's
+ *    stale `Succeeded` is ignored because no submit was armed yet).
+ *  - A previous attempt to baseline-snapshot at composition entry was
+ *    insufficient because `uiState.stateIn(initialValue = Idle, ...)`
+ *    publishes the Idle initial value before the coordinator's real
+ *    Succeeded propagates — so the baseline read Idle and the next
+ *    frame still bounced.
  */
 @Composable
 fun RunRoute(
@@ -92,28 +99,38 @@ fun RunRoute(
 
     val state by vm.uiState.collectAsState()
 
-    // Baseline captured at entry: if a stale Succeeded is already
-    // visible on the singleton coordinator, treat that promptId as
-    // "already handled" so we don't bounce the user out to the gallery
-    // on a stale value.
-    val baselineSucceededPromptId = remember(vm) {
-        (vm.uiState.value.phase as? RunUiState.Phase.Succeeded)?.promptId
-    }
+    // Armed only when the user submits from THIS RunRoute composition.
+    // onSuccess consumes (clears) the flag on the next Succeeded phase
+    // so a single submit drives at most one navigation. Without this,
+    // the singleton coordinator's stale Succeeded would slip through
+    // any uiState-derived guard because `stateIn(initialValue = Idle)`
+    // publishes Idle first and only later replays the coordinator's
+    // real Succeeded — a frame-late race that the baseline approach
+    // could not catch.
+    val submittedInThisRoute = remember { mutableStateOf(false) }
 
-    // Fire onSuccess exactly once per NEW Succeeded promptId. The
-    // LaunchedEffect key still uses the promptId so repeated runs in
-    // the same RunRoute composition (rare, but possible if the host
-    // doesn't unwind on success) re-fire on each distinct success.
     val succeededPhase = state.phase as? RunUiState.Phase.Succeeded
     LaunchedEffect(succeededPhase?.promptId) {
         val phase = succeededPhase ?: return@LaunchedEffect
-        if (phase.promptId == baselineSucceededPromptId) return@LaunchedEffect
+        if (!submittedInThisRoute.value) return@LaunchedEffect
+        // Consume the flag BEFORE invoking onSuccess so a re-entry
+        // landing on the same Succeeded value (no new submit) does
+        // not retrigger navigation.
+        submittedInThisRoute.value = false
         onSuccess(phase.promptId, phase.outputs)
     }
 
     val intents = remember(vm, onClose) {
         RunIntents(
-            submit = vm::onSubmit,
+            submit = {
+                // Arm the navigation gate BEFORE dispatching the run.
+                // Even if the state transitions Submitting → Queued →
+                // Running → Succeeded in fast succession, the flag is
+                // already armed when LaunchedEffect picks up the
+                // terminal Succeeded.
+                submittedInThisRoute.value = true
+                vm.onSubmit()
+            },
             requestCancel = vm::requestCancel,
             confirmCancel = vm::confirmCancel,
             dismissCancel = vm::dismissCancel,
