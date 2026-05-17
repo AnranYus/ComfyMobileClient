@@ -8,6 +8,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import com.comfymobile.domain.job.JobOutputRef
 import com.comfymobile.domain.workflow.WorkflowEnvelope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -18,8 +19,7 @@ import org.koin.compose.koinInject
 import org.koin.core.parameter.parametersOf
 
 /**
- * Composable shell that owns one [RunViewModel] tied to the screen's
- * lifetime.
+ * Composable host shell for [RunScreen] + [RunViewModel].
  *
  * Host wiring contract:
  *  - Caller passes in the [workflow] to run (the user's currently-loaded
@@ -30,14 +30,25 @@ import org.koin.core.parameter.parametersOf
  *    the composition (per @Lily PR #29 review pattern: factory VMs
  *    take vmScope, no APP_SCOPE for UI actions).
  *
- * Navigation concerns (back, success → gallery transition) are owned
- * by the caller; this route only renders the surface and forwards
- * intents.
+ * Navigation callbacks:
+ *  - [onSuccess]: invoked exactly once when the run reaches
+ *    [com.comfymobile.domain.run.RunState.Succeeded]. The host typically
+ *    transitions to the output gallery with the supplied outputs.
+ *  - [onClose]: invoked when the user dismisses the surface (back
+ *    button or "Close" on a terminal sheet). The host typically
+ *    returns to the workflow / graph view.
+ *
+ * Both callbacks are wired through the same `state.terminal` observation
+ * — the surface never reaches into [com.comfymobile.domain.run.RunCoordinator]
+ * directly for navigation decisions. Per @Lily T2.3 follow-up gate 1
+ * (msg `39168de4`): navigation does NOT bypass the coordinator.
  */
 @Composable
 fun RunRoute(
     workflow: WorkflowEnvelope?,
     modifier: Modifier = Modifier,
+    onSuccess: (List<JobOutputRef>) -> Unit = {},
+    onClose: () -> Unit = {},
 ) {
     val composeScope = rememberCoroutineScope()
     val vmScope = remember(composeScope) {
@@ -68,13 +79,31 @@ fun RunRoute(
     }
 
     val state by vm.uiState.collectAsState()
-    val intents = remember(vm) {
+
+    // Drive the host's onSuccess callback off the Succeeded phase. Use
+    // promptId as the LaunchedEffect key so we fire exactly once per
+    // successful run (re-running on the same RunRoute would produce a
+    // new promptId and re-trigger the navigation).
+    val succeededPhase = state.phase as? RunUiState.Phase.Succeeded
+    LaunchedEffect(succeededPhase?.promptId) {
+        if (succeededPhase != null) {
+            onSuccess(succeededPhase.outputs)
+        }
+    }
+
+    val intents = remember(vm, onClose) {
         RunIntents(
             submit = vm::onSubmit,
             requestCancel = vm::requestCancel,
             confirmCancel = vm::confirmCancel,
             dismissCancel = vm::dismissCancel,
-            dismissTerminal = vm::dismissTerminal,
+            // "Close" on a terminal sheet hides the modal AND signals
+            // the host to navigate away. Host can choose: stay on
+            // RunRoute (no-op onClose) or unwind to the workflow view.
+            dismissTerminal = {
+                vm.dismissTerminal()
+                onClose()
+            },
         )
     }
 
