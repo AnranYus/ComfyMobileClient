@@ -204,6 +204,24 @@ class OutputGalleryViewModelTest {
         assertEquals(listOf("save:one.png", "share:one.png"), gateway.calls)
     }
 
+    @Test fun delayed_share_clears_busy_when_viewer_selection_changes_before_result() = runTest {
+        val gateway = DelayedShareGateway()
+        val vm = viewModel(actionGateway = gateway, scope = this)
+
+        vm.show(outputs = listOf(ComfyOutputRef("one.png", "", "output")))
+
+        vm.actions().onShareSelected()
+        gateway.shareStarted.await()
+        assertEquals(OutputGalleryAction.Share, vm.state.value.actionInProgress)
+
+        vm.actions().onCloseViewer()
+        gateway.allowShare.complete(Unit)
+        runCurrent()
+
+        assertEquals(null, vm.state.value.selectedIndex)
+        assertEquals(null, vm.state.value.actionInProgress)
+    }
+
     private fun viewModel(
         repository: JobRepository? = null,
         actionGateway: OutputGalleryActionGateway = DisabledOutputGalleryActionGateway,
@@ -350,6 +368,19 @@ class OutputGalleryViewModelTest {
 
         override suspend fun share(target: OutputGalleryActionTarget): OutputGalleryActionResult {
             calls += "share:${target.ref.filename}"
+            return OutputGalleryActionResult.Success
+        }
+    }
+
+    private class DelayedShareGateway : OutputGalleryActionGateway {
+        val shareStarted = CompletableDeferred<Unit>()
+        val allowShare = CompletableDeferred<Unit>()
+
+        override fun canShare(target: OutputGalleryActionTarget): Boolean = true
+
+        override suspend fun share(target: OutputGalleryActionTarget): OutputGalleryActionResult {
+            shareStarted.complete(Unit)
+            allowShare.await()
             return OutputGalleryActionResult.Success
         }
     }

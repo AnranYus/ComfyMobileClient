@@ -5,13 +5,15 @@ import io.ktor.client.HttpClient
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
-import platform.Foundation.NSData
 import platform.Foundation.NSFileManager
 import platform.Foundation.NSTemporaryDirectory
 import platform.Foundation.NSURL
 import platform.UIKit.UIActivityViewController
 import platform.UIKit.UIApplication
 import platform.UIKit.UIViewController
+import platform.posix.fclose
+import platform.posix.fopen
+import platform.posix.fwrite
 
 actual fun createOutputGalleryActionGateway(
     context: PlatformContext,
@@ -35,18 +37,19 @@ private class IosOutputGalleryShareBridge : OutputGalleryShareBridge {
         return OutputGalleryActionResult.Success
     }
 
+    @OptIn(ExperimentalForeignApi::class)
     private fun writeShareFile(payload: OutputGallerySharePayload): NSURL? {
         val directory = NSTemporaryDirectory().trimEnd('/') + "/comfy-gallery-share"
-        NSFileManager.defaultManager.createDirectoryAtPath(
+        val directoryReady = NSFileManager.defaultManager.createDirectoryAtPath(
             path = directory,
             withIntermediateDirectories = true,
             attributes = null,
             error = null,
         )
+        if (!directoryReady) return null
         val fileName = payload.fileName.sanitizedFileName()
         val path = "$directory/$fileName"
-        val data = payload.bytes.toNSData()
-        return if (data.writeToFile(path, atomically = true)) {
+        return if (payload.bytes.writeToPath(path)) {
             NSURL.fileURLWithPath(path)
         } else {
             null
@@ -65,7 +68,18 @@ private fun rootViewController(): UIViewController? =
     UIApplication.sharedApplication.keyWindow?.rootViewController
 
 @OptIn(ExperimentalForeignApi::class)
-private fun ByteArray.toNSData(): NSData =
-    usePinned { pinned ->
-        NSData.create(bytes = pinned.addressOf(0), length = size.toULong())
+private fun ByteArray.writeToPath(path: String): Boolean {
+    val file = fopen(path, "wb") ?: return false
+    return try {
+        if (isEmpty()) {
+            true
+        } else {
+            val written = usePinned { pinned ->
+                fwrite(pinned.addressOf(0), 1UL, size.toULong(), file)
+            }
+            written == size.toULong()
+        }
+    } finally {
+        fclose(file)
     }
+}

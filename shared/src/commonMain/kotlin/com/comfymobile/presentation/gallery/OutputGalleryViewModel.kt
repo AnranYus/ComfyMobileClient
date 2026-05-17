@@ -214,7 +214,7 @@ class OutputGalleryViewModel(
                 // toast/snackbar. For now, keep the preparatory seam silent
                 // and side-effect free on failure.
             } finally {
-                if (isCurrent(session, actionId)) {
+                if (isSameGallerySession(session, actionId)) {
                     mutableState.value = mutableState.value.copy(actionInProgress = null).withActionAvailability()
                 }
             }
@@ -233,6 +233,11 @@ class OutputGalleryViewModel(
             galleryGeneration == session.generation &&
             mutableState.value.promptId == session.promptId &&
             mutableState.value.selectedItem?.ref?.identityKey == session.selectedOutputKey
+
+    private fun isSameGallerySession(session: GallerySession, actionId: Long): Boolean =
+        actionId == latestActionId &&
+            galleryGeneration == session.generation &&
+            mutableState.value.promptId == session.promptId
 
     private fun OutputGalleryState.withActionAvailability(): OutputGalleryState {
         val target = selectedItem?.toActionTarget()
