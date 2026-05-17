@@ -24,6 +24,7 @@ import com.comfymobile.data.connect.ConnectAttemptCoordinator
 import com.comfymobile.data.connection.ConnectionStateMachineFacade
 import com.comfymobile.data.image.ComfyImageMapper
 import com.comfymobile.data.image.ComfyOutputRef
+import com.comfymobile.data.run.RunReconciler
 import com.comfymobile.data.workflow.WorkflowImporter
 import com.comfymobile.domain.job.JobOutputRef
 import com.comfymobile.domain.server.ServerHistoryStore
@@ -36,6 +37,7 @@ import com.comfymobile.presentation.importer.WorkflowImportRoute
 import com.comfymobile.presentation.importer.WorkflowImportViewModel
 import com.comfymobile.presentation.run.RunCopy
 import com.comfymobile.presentation.run.RunRoute
+import kotlinx.coroutines.launch
 import org.koin.compose.getKoin
 import org.koin.core.parameter.parametersOf
 
@@ -115,6 +117,24 @@ fun App() {
             DisposableEffect(coordinator) {
                 coordinator.start()
                 onDispose { coordinator.stop() }
+            }
+
+            // B/C ghost-state reconciliation. Side-channel /history
+            // probing for an in-flight RunCoordinator run when WS is
+            // unreliable. Idempotent start/stop; lives off the
+            // process-lifetime APP_SCOPE so it survives composition
+            // rebuilds (per @Lily T2.3 follow-up gate 3 + Bootstrap
+            // pattern from PR #18 thread `62385887`).
+            val runReconciler = remember { koin.get<RunReconciler>() }
+            DisposableEffect(runReconciler) {
+                runReconciler.start()
+                onDispose {
+                    // RunReconciler.stop is suspend; fire from app
+                    // scope. The reconciler's observers are tied to
+                    // APP_SCOPE so they'll be cancelled there too,
+                    // making this stop() idempotent.
+                    scope.launch { runReconciler.stop() }
+                }
             }
 
             // ----------------------------------------------------------------- MVP nav state

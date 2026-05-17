@@ -18,8 +18,11 @@ import com.comfymobile.data.platform.PlatformContext
 import com.comfymobile.data.platform.createSettings
 import com.comfymobile.data.platform.createSqlDriver
 import com.comfymobile.data.platform.nowEpochMs
+import com.comfymobile.data.run.HistoryProbePort
 import com.comfymobile.data.run.HttpClientCancelPort
+import com.comfymobile.data.run.HttpClientHistoryProbePort
 import com.comfymobile.data.run.HttpClientPromptPort
+import com.comfymobile.data.run.RunReconciler
 import com.comfymobile.data.run.WebSocketSourceWsEventPort
 import com.comfymobile.data.workflow.WorkflowImporter
 import com.comfymobile.db.ComfyMobileDb
@@ -377,6 +380,39 @@ fun appModule(): Module = module {
             connectionState = get<ConnectionStateMachineFacade>().currentState,
             clientId = CLIENT_ID_PER_PROCESS,
             scope = vmScope,
+        )
+    }
+
+    // ----------------------------------------------------------------- T2.3 follow-up 2: B/C history reconciler
+    //
+    // Side-channel reconciliation for an in-flight RunCoordinator run
+    // when the WS stream is unreliable. Process-lifetime singleton; the
+    // App / platform host calls start()/stop() at the right lifecycle
+    // points (mirrors ConnectionStateMachineBootstrap pattern).
+    //
+    // Per @Lily T2.3 follow-up gate 3 (msg `39168de4`): the reconciler
+    // delivers terminals via RunCoordinator.applyReconciledTerminal,
+    // which the coordinator's reducer suppresses if a real terminal
+    // was already committed — terminal authority preserved.
+
+    single<HistoryProbePort> {
+        HttpClientHistoryProbePort(
+            httpClientFactory = { baseUrl ->
+                get<ComfyHttpClient> { org.koin.core.parameter.parametersOf(baseUrl) }
+            },
+        )
+    }
+
+    single<RunReconciler> {
+        val coordinator = get<com.comfymobile.domain.run.RunCoordinator>()
+        RunReconciler(
+            activeRunContext = coordinator.activeRunContext,
+            applyReconciledTerminal = coordinator::applyReconciledTerminal,
+            connectionState = get<ConnectionStateMachineFacade>().currentState,
+            historyProbe = get(),
+            jobs = get(),
+            clock = get(),
+            scope = get(qualifier = APP_SCOPE),
         )
     }
 }
