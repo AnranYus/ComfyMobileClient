@@ -44,6 +44,7 @@ class RenderPlanBuilderTest {
         runtimeStatus: NodeRuntimeStatus = NodeRuntimeStatus.IDLE,
         resolveSummaryRows: (ParsedNode) -> List<SummaryEntry> = { emptyList() },
         graphPalette: GraphPalette = palette,
+        interactiveLodDowngrade: Boolean = false,
     ): RenderPlan {
         val layout = GraphLayout.layout(graph)
         return RenderPlanBuilder.build(
@@ -71,6 +72,7 @@ class RenderPlanBuilderTest {
             resolveSummaryRows = resolveSummaryRows,
             visibleBounds = visibleBounds,
             graphPalette = graphPalette,
+            interactiveLodDowngrade = interactiveLodDowngrade,
         )
     }
 
@@ -409,6 +411,97 @@ class RenderPlanBuilderTest {
             resolveSummaryRows = { _ -> listOf(SummaryEntry("should not appear")) },
         )
         assertEquals(0, plan.visibleSummaryRowCount())
+    }
+
+    // ---------------------------------------------------------------- §1.5 / §1.8 interactive LOD downgrade
+
+    @Test fun interactive_lod_downgrade_off_keeps_bezier_edges() {
+        // Default (off) — edges keep their bezier path; the
+        // straightLineFallback flag is `false`. The Compose adapter
+        // therefore renders bezier curves.
+        val graph = ParsedUiGraph(
+            nodes = listOf(
+                node("a", outputs = listOf(port(0, "MODEL"))),
+                node("b", pos = Position(400f, 0f), inputs = listOf(port(0, "MODEL"))),
+                node("c", pos = Position(800f, 0f), inputs = listOf(port(0, "MODEL"))),
+            ),
+            links = listOf(
+                ParsedLink("e1", "a", 0, "b", 0, "MODEL"),
+                ParsedLink("e2", "a", 0, "c", 0, "MODEL"),
+            ),
+        )
+        val plan = buildPlan(graph, interactiveLodDowngrade = false)
+        val edges = plan.commands.filterIsInstance<DrawCommand.Edge>()
+        assertEquals(2, edges.size)
+        assertTrue(
+            edges.all { !it.straightLineFallback },
+            "with downgrade=false, every edge must keep straightLineFallback=false; got " +
+                edges.map { it.straightLineFallback },
+        )
+    }
+
+    @Test fun interactive_lod_downgrade_on_flips_straight_line_fallback_for_every_edge() {
+        // Per @Ores T2.7 §1.5 / §1.8: during pan/zoom/node-drag the
+        // Compose adapter swaps bezier rendering for straight lines.
+        // The downgrade is RenderPlan-driven so the gesture layer can
+        // re-render once with `gestureState.isInteracting = true` and
+        // get a fully straight-line plan deterministically.
+        val graph = ParsedUiGraph(
+            nodes = listOf(
+                node("a", outputs = listOf(port(0, "MODEL"))),
+                node("b", pos = Position(400f, 0f), inputs = listOf(port(0, "MODEL"))),
+                node("c", pos = Position(800f, 0f), inputs = listOf(port(0, "MODEL"))),
+            ),
+            links = listOf(
+                ParsedLink("e1", "a", 0, "b", 0, "MODEL"),
+                ParsedLink("e2", "a", 0, "c", 0, "MODEL"),
+            ),
+        )
+        val plan = buildPlan(graph, interactiveLodDowngrade = true)
+        val edges = plan.commands.filterIsInstance<DrawCommand.Edge>()
+        assertEquals(2, edges.size, "downgrade flag must not affect edge count")
+        assertTrue(
+            edges.all { it.straightLineFallback },
+            "with downgrade=true, every edge must report straightLineFallback=true; got " +
+                edges.map { it.straightLineFallback },
+        )
+    }
+
+    @Test fun interactive_lod_downgrade_does_not_alter_non_edge_commands() {
+        // The downgrade flag is *edge-only*: node body / title / port
+        // commands must be unchanged so a pan/zoom doesn't introduce
+        // visual regressions on the nodes themselves.
+        val graph = ParsedUiGraph(
+            nodes = listOf(
+                node("a", outputs = listOf(port(0, "MODEL"))),
+                node("b", pos = Position(400f, 0f), inputs = listOf(port(0, "MODEL"))),
+            ),
+            links = listOf(ParsedLink("e", "a", 0, "b", 0, "MODEL")),
+        )
+        val noDowngrade = buildPlan(graph, interactiveLodDowngrade = false)
+        val withDowngrade = buildPlan(graph, interactiveLodDowngrade = true)
+
+        // Same command count + same per-type counts: the downgrade only
+        // toggles a flag, never adds/removes commands.
+        assertEquals(noDowngrade.commands.size, withDowngrade.commands.size)
+        for (type in listOf(
+            DrawCommand.NodeBody::class,
+            DrawCommand.NodeTitle::class,
+            DrawCommand.NodePort::class,
+        )) {
+            assertEquals(
+                noDowngrade.commands.count { type.isInstance(it) },
+                withDowngrade.commands.count { type.isInstance(it) },
+                "downgrade flag must not change ${type.simpleName} count",
+            )
+        }
+        // Node-side commands must be byte-equal between the two plans
+        // (no subtle palette / position drift). Compare structurally
+        // by filtering out Edge commands.
+        val nodeOnlyNo = noDowngrade.commands.filterNot { it is DrawCommand.Edge }
+        val nodeOnlyWith = withDowngrade.commands.filterNot { it is DrawCommand.Edge }
+        assertEquals(nodeOnlyNo, nodeOnlyWith,
+            "non-Edge draw commands must be structurally identical regardless of downgrade flag")
     }
 
     private fun DrawCommand.nodeIdOrNull(): String? = when (this) {

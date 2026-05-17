@@ -215,6 +215,15 @@ object RenderPlanBuilder {
          * a palette per test.
          */
         graphPalette: GraphPalette = GraphPalette.defaultLightForTesting,
+        /**
+         * When true, every emitted [DrawCommand.Edge] flips its
+         * [DrawCommand.Edge.straightLineFallback] flag so the Compose
+         * adapter renders the edge as a straight line instead of a
+         * bezier. Set this to `gestureState.isInteracting` during
+         * pan/zoom/node-drag per @Ores T2.7 §1.5 / §1.8 LOD contract
+         * (PR #21 msg `26c8f2f3`).
+         */
+        interactiveLodDowngrade: Boolean = false,
     ): RenderPlan {
         val nodeById = graph.nodes.associateBy { it.id }
         val visibleNodeIds = layoutResult.nodes.entries
@@ -249,6 +258,7 @@ object RenderPlanBuilder {
                     path = path,
                     argb = resolvePortStyle(sourcePort).argb,
                     widthDp = 2f,
+                    straightLineFallback = interactiveLodDowngrade,
                 ),
             )
         }

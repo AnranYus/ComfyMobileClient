@@ -71,10 +71,11 @@ fun GraphCanvas(
 }
 
 /**
- * Single-command translator. Kept private so the only public surface
- * is [GraphCanvas] and the upstream pure-function pipeline.
+ * Single-command translator. Was private until T2.1b's
+ * [InteractiveGraphCanvas] needed to share the drawCommand fan-out
+ * inside a `withTransform` block.
  */
-private fun DrawScope.drawCommand(
+internal fun DrawScope.drawCommand(
     command: DrawCommand,
     dpToPx: Float,
     measurer: TextMeasurer,
