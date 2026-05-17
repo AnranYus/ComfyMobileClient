@@ -104,19 +104,45 @@ class RunCoordinatorTest {
         override suspend fun deleteQueued(promptId: String) { deleteCalls += promptId }
     }
 
+    /**
+     * Test fake that honors the [WsEventPort] cold-flow contract: every
+     * call to [events] opens a fresh session (a brand-new Channel).
+     *
+     * Per @Lily PR #30 review msg `357624f8`: reusing the same Channel
+     * across runs violates the contract because `consumeAsFlow` cancels
+     * the underlying channel when its collector is cancelled — so the
+     * first run's `wsJob.cancel()` poisons the channel for any later
+     * run that tries to subscribe. Each run getting its own session
+     * mirrors the production behavior of a fresh `/ws` connection per
+     * subscription.
+     *
+     * [send] / [close] act on the **most recently created** session,
+     * which is the natural target for a test that has just observed
+     * the latest run reach Queued.
+     */
     private class ChannelWs : WsEventPort {
-        val channel: Channel<WsEvent> = Channel(capacity = Channel.UNLIMITED)
-        var lastClientId: String? = null
+        val sessions: MutableList<Channel<WsEvent>> = mutableListOf()
+        val clientIds: MutableList<String> = mutableListOf()
+        val lastClientId: String? get() = clientIds.lastOrNull()
+
         override fun events(clientId: String): Flow<WsEvent> {
-            lastClientId = clientId
-            return channel.consumeAsFlow()
+            clientIds += clientId
+            val session = Channel<WsEvent>(capacity = Channel.UNLIMITED)
+            sessions += session
+            return session.consumeAsFlow()
         }
+
+        /** Send to the most-recently-opened session. */
         fun send(event: WsEvent) {
-            val r = channel.trySend(event)
+            val s = sessions.lastOrNull()
+                ?: error("ChannelWs.send() called before any events() session was opened")
+            val r = s.trySend(event)
             check(r.isSuccess) { "channel send failed: $r" }
         }
+
+        /** Close the most-recently-opened session. */
         fun close() {
-            channel.close()
+            sessions.lastOrNull()?.close()
         }
     }
 
