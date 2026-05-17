@@ -31,23 +31,35 @@ import org.koin.core.parameter.parametersOf
  *    take vmScope, no APP_SCOPE for UI actions).
  *
  * Navigation callbacks:
- *  - [onSuccess]: invoked exactly once when the run reaches
- *    [com.comfymobile.domain.run.RunState.Succeeded]. The host typically
- *    transitions to the output gallery with the supplied outputs.
+ *  - [onSuccess]: invoked once when the run reaches
+ *    [com.comfymobile.domain.run.RunState.Succeeded] AFTER this route
+ *    has been entered. The callback receives both the `promptId` and
+ *    the outputs so the host can preserve stable job identity for
+ *    downstream features (favorite, share, history deep-link) — per
+ *    @Lily PR #32 review msg `5a73db76` blocker 2.
  *  - [onClose]: invoked when the user dismisses the surface (back
  *    button or "Close" on a terminal sheet). The host typically
  *    returns to the workflow / graph view.
  *
- * Both callbacks are wired through the same `state.terminal` observation
- * — the surface never reaches into [com.comfymobile.domain.run.RunCoordinator]
- * directly for navigation decisions. Per @Lily T2.3 follow-up gate 1
- * (msg `39168de4`): navigation does NOT bypass the coordinator.
+ * Both callbacks read off [RunUiState] which is a pure projection of
+ * `RunCoordinator.state`. The surface never reaches into
+ * [com.comfymobile.domain.run.RunCoordinator] directly for navigation
+ * (per @Lily T2.3 follow-up gate 1, msg `39168de4`).
+ *
+ * **Replay protection** (per @Lily PR #32 review msg `5a73db76` blocker
+ * 1): on entry, the route captures the singleton coordinator's
+ * currently-displayed Succeeded promptId (if any) as a baseline. The
+ * route IGNORES that baseline promptId and fires `onSuccess` only for
+ * a promptId that differs from it. Without this, navigating away after
+ * a successful run and re-entering RunRoute would immediately bounce
+ * the user back to the gallery without a real new submission, because
+ * the coordinator (a singleton) still carries the prior Succeeded.
  */
 @Composable
 fun RunRoute(
     workflow: WorkflowEnvelope?,
     modifier: Modifier = Modifier,
-    onSuccess: (List<JobOutputRef>) -> Unit = {},
+    onSuccess: (promptId: String, outputs: List<JobOutputRef>) -> Unit = { _, _ -> },
     onClose: () -> Unit = {},
 ) {
     val composeScope = rememberCoroutineScope()
@@ -80,15 +92,23 @@ fun RunRoute(
 
     val state by vm.uiState.collectAsState()
 
-    // Drive the host's onSuccess callback off the Succeeded phase. Use
-    // promptId as the LaunchedEffect key so we fire exactly once per
-    // successful run (re-running on the same RunRoute would produce a
-    // new promptId and re-trigger the navigation).
+    // Baseline captured at entry: if a stale Succeeded is already
+    // visible on the singleton coordinator, treat that promptId as
+    // "already handled" so we don't bounce the user out to the gallery
+    // on a stale value.
+    val baselineSucceededPromptId = remember(vm) {
+        (vm.uiState.value.phase as? RunUiState.Phase.Succeeded)?.promptId
+    }
+
+    // Fire onSuccess exactly once per NEW Succeeded promptId. The
+    // LaunchedEffect key still uses the promptId so repeated runs in
+    // the same RunRoute composition (rare, but possible if the host
+    // doesn't unwind on success) re-fire on each distinct success.
     val succeededPhase = state.phase as? RunUiState.Phase.Succeeded
     LaunchedEffect(succeededPhase?.promptId) {
-        if (succeededPhase != null) {
-            onSuccess(succeededPhase.outputs)
-        }
+        val phase = succeededPhase ?: return@LaunchedEffect
+        if (phase.promptId == baselineSucceededPromptId) return@LaunchedEffect
+        onSuccess(phase.promptId, phase.outputs)
     }
 
     val intents = remember(vm, onClose) {

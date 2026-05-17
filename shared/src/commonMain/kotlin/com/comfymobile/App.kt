@@ -155,16 +155,13 @@ fun App() {
                     is AppScreen.Idle -> Unit
                     is AppScreen.Running -> RunRoute(
                         workflow = current.envelope,
-                        onSuccess = { outputs ->
-                            // Find the most-recent RunCoordinator.state to
-                            // capture promptId for the gallery — but per
-                            // gate 1, we don't reach into it. The outputs
-                            // already in the callback ARE Succeeded's.
-                            // promptId is derivable from the latest Job in
-                            // the repo by Andy's T2.4 second segment; for
-                            // now we leave it null.
+                        onSuccess = { promptId, outputs ->
+                            // Per @Lily PR #32 review msg `5a73db76`
+                            // blocker 2: preserve stable job identity
+                            // through to the gallery for downstream
+                            // favorite / share / history features.
                             screen = AppScreen.Gallery(
-                                promptId = null,
+                                promptId = promptId,
                                 outputs = outputs,
                             )
                         },
