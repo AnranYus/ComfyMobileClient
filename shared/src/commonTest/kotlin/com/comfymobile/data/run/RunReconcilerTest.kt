@@ -5,10 +5,6 @@ import com.comfymobile.data.network.ConnectionState
 import com.comfymobile.data.network.ReconnectReason
 import com.comfymobile.data.network.dto.HistoryEntryDto
 import com.comfymobile.data.network.dto.HistoryStatusDto
-import com.comfymobile.data.persistence.InMemoryJobRepository
-import com.comfymobile.domain.job.Job
-import com.comfymobile.domain.job.JobOutputRef
-import com.comfymobile.domain.job.JobStatus
 import com.comfymobile.domain.run.ActiveRunContext
 import com.comfymobile.domain.run.Clock
 import com.comfymobile.domain.run.ReconciledOutcome
@@ -99,46 +95,30 @@ class RunReconcilerTest {
         connectionState: MutableStateFlow<ConnectionState> = MutableStateFlow(ConnectionState.Connected),
         probe: RecordingHistoryProbe = RecordingHistoryProbe(),
         applier: Applier = Applier(),
-        jobs: InMemoryJobRepository = InMemoryJobRepository(),
         clock: Clock = FakeClock(),
         bBranchPollPeriodMs: Long = 50,
         bBranchTotalTimeoutMs: Long = 200,
         scope: kotlinx.coroutines.CoroutineScope,
-    ): Quintuple {
-        if (activeRun != null) {
-            // seed the job row so updateStatus has a target
-            kotlinx.coroutines.runBlocking {
-                jobs.upsert(
-                    Job(
-                        promptId = activeRun.promptId,
-                        serverId = activeRun.serverId,
-                        status = JobStatus.QUEUED,
-                        createdAtEpochMs = 0L,
-                    )
-                )
-            }
-        }
+    ): Setup {
         val activeFlow = MutableStateFlow(activeRun)
         val r = RunReconciler(
             activeRunContext = activeFlow,
             applyReconciledTerminal = applier::apply,
             connectionState = connectionState,
             historyProbe = probe,
-            jobs = jobs,
             clock = clock,
             scope = scope,
             bBranchPollPeriodMs = bBranchPollPeriodMs,
             bBranchTotalTimeoutMs = bBranchTotalTimeoutMs,
         )
-        return Quintuple(r, connectionState, probe, applier, jobs)
+        return Setup(r, connectionState, probe, applier)
     }
 
-    private data class Quintuple(
+    private data class Setup(
         val reconciler: RunReconciler,
         val connectionState: MutableStateFlow<ConnectionState>,
         val probe: RecordingHistoryProbe,
         val applier: Applier,
-        val jobs: InMemoryJobRepository,
     )
 
     private fun historyEntryWithStatus(
@@ -168,7 +148,7 @@ class RunReconcilerTest {
     // ----------------------------------------------------------------- C-branch single probe
 
     @Test fun BACKGROUND_RESUMED_triggers_one_shot_probe() = runTest {
-        val (r, conn, probe, applier, jobs) = reconciler(
+        val (r, conn, probe, applier) = reconciler(
             scope = backgroundScope,
         )
         probe.response = historyEntryWithStatus(
@@ -193,16 +173,16 @@ class RunReconcilerTest {
         assertEquals(1, succeeded.outputs.size)
         assertEquals("img_001.png", succeeded.outputs[0].filename)
 
-        // Job row should have been updated.
-        val persisted = jobs.getByPromptId("p-1")!!
-        assertEquals(JobStatus.SUCCEEDED, persisted.status)
-        assertEquals(JobOutputRef("img_001.png", "", "output"), persisted.firstOutput)
+        // Persistence is the coordinator's responsibility now (per
+        // @Lily PR #34 review msg `4996df44` blocker 2). End-to-end
+        // persistence flow is verified in RunCoordinator integration
+        // tests via finalizeFromSnapshot.
 
         r.stop()
     }
 
     @Test fun completed_error_status_applies_Failed_outcome() = runTest {
-        val (r, conn, probe, applier, jobs) = reconciler(scope = backgroundScope)
+        val (r, conn, probe, applier) = reconciler(scope = backgroundScope)
         probe.response = historyEntryWithStatus(completed = true, statusStr = "error")
 
         r.start()
@@ -212,13 +192,12 @@ class RunReconcilerTest {
             while (applier.calls.isEmpty()) kotlinx.coroutines.delay(5)
         }
         assertIs<ReconciledOutcome.Failed>(applier.calls.single().second)
-        assertEquals(JobStatus.FAILED, jobs.getByPromptId("p-1")!!.status)
 
         r.stop()
     }
 
     @Test fun completed_interrupted_status_applies_Interrupted_outcome() = runTest {
-        val (r, conn, probe, applier, jobs) = reconciler(scope = backgroundScope)
+        val (r, conn, probe, applier) = reconciler(scope = backgroundScope)
         probe.response = historyEntryWithStatus(completed = true, statusStr = "interrupted")
 
         r.start()
@@ -228,13 +207,12 @@ class RunReconcilerTest {
             while (applier.calls.isEmpty()) kotlinx.coroutines.delay(5)
         }
         assertEquals(ReconciledOutcome.Interrupted, applier.calls.single().second)
-        assertEquals(JobStatus.INTERRUPTED, jobs.getByPromptId("p-1")!!.status)
 
         r.stop()
     }
 
     @Test fun completed_with_null_status_str_defaults_to_Succeeded() = runTest {
-        val (r, conn, probe, applier, _) = reconciler(scope = backgroundScope)
+        val (r, conn, probe, applier) = reconciler(scope = backgroundScope)
         probe.response = historyEntryWithStatus(completed = true, statusStr = null)
 
         r.start()
@@ -249,7 +227,7 @@ class RunReconcilerTest {
     }
 
     @Test fun history_entry_not_found_applies_Failed_with_Network_error() = runTest {
-        val (r, conn, probe, applier, jobs) = reconciler(scope = backgroundScope)
+        val (r, conn, probe, applier) = reconciler(scope = backgroundScope)
         probe.response = null // server has no entry
 
         r.start()
@@ -260,7 +238,6 @@ class RunReconcilerTest {
         }
         val outcome = assertIs<ReconciledOutcome.Failed>(applier.calls.single().second)
         assertIs<IllegalStateException>(outcome.error.let { (it as RunError.Network).cause })
-        assertEquals(JobStatus.FAILED, jobs.getByPromptId("p-1")!!.status)
 
         r.stop()
     }
@@ -268,7 +245,7 @@ class RunReconcilerTest {
     // ----------------------------------------------------------------- still running → no apply
 
     @Test fun still_running_does_not_apply_or_settle() = runTest {
-        val (r, conn, probe, applier, jobs) = reconciler(scope = backgroundScope)
+        val (r, conn, probe, applier) = reconciler(scope = backgroundScope)
         probe.response = historyEntryWithStatus(completed = false, statusStr = null)
 
         r.start()
@@ -281,7 +258,6 @@ class RunReconcilerTest {
         // Apply should never happen.
         kotlinx.coroutines.delay(100)
         assertTrue(applier.calls.isEmpty())
-        assertEquals(JobStatus.QUEUED, jobs.getByPromptId("p-1")!!.status)
 
         r.stop()
     }
@@ -289,7 +265,7 @@ class RunReconcilerTest {
     // ----------------------------------------------------------------- B-branch polling
 
     @Test fun LAN_FLAKE_polls_until_completed_then_stops() = runTest {
-        val (r, conn, probe, applier, _) = reconciler(
+        val (r, conn, probe, applier) = reconciler(
             scope = backgroundScope,
             bBranchPollPeriodMs = 30,
             bBranchTotalTimeoutMs = 500,
@@ -317,14 +293,6 @@ class RunReconcilerTest {
             applyReconciledTerminal = applier2::apply,
             connectionState = conn,
             historyProbe = customProbe,
-            jobs = InMemoryJobRepository().also {
-                it.upsert(Job(
-                    promptId = "p-1",
-                    serverId = "srv:8188",
-                    status = JobStatus.QUEUED,
-                    createdAtEpochMs = 0L,
-                ))
-            },
             clock = FakeClock(),
             scope = backgroundScope,
             bBranchPollPeriodMs = 30,
@@ -346,7 +314,7 @@ class RunReconcilerTest {
     // ----------------------------------------------------------------- cancel on connected/lost
 
     @Test fun Connected_cancels_in_flight_probe() = runTest {
-        val (r, conn, _, applier, _) = reconciler(
+        val (r, conn, _, applier) = reconciler(
             scope = backgroundScope,
             bBranchPollPeriodMs = 30,
             bBranchTotalTimeoutMs = 500,
@@ -367,14 +335,6 @@ class RunReconcilerTest {
             applyReconciledTerminal = applier2::apply,
             connectionState = conn,
             historyProbe = hangingProbe,
-            jobs = InMemoryJobRepository().also {
-                it.upsert(Job(
-                    promptId = "p-1",
-                    serverId = "srv:8188",
-                    status = JobStatus.QUEUED,
-                    createdAtEpochMs = 0L,
-                ))
-            },
             clock = FakeClock(),
             scope = backgroundScope,
             bBranchPollPeriodMs = 30,
@@ -410,14 +370,6 @@ class RunReconcilerTest {
             applyReconciledTerminal = applier::apply,
             connectionState = conn,
             historyProbe = hangingProbe,
-            jobs = InMemoryJobRepository().also {
-                it.upsert(Job(
-                    promptId = "p-1",
-                    serverId = "srv:8188",
-                    status = JobStatus.QUEUED,
-                    createdAtEpochMs = 0L,
-                ))
-            },
             clock = FakeClock(),
             scope = backgroundScope,
         )
@@ -433,7 +385,7 @@ class RunReconcilerTest {
     // ----------------------------------------------------------------- no active run
 
     @Test fun no_active_run_skips_probe_entirely() = runTest {
-        val (r, conn, probe, applier, _) = reconciler(
+        val (r, conn, probe, applier) = reconciler(
             activeRun = null,
             scope = backgroundScope,
         )
@@ -454,7 +406,7 @@ class RunReconcilerTest {
             baseUrl = "http://server-bound-to-run:8188",
             serverId = "server-bound-to-run:8188",
         )
-        val (r, conn, probe, applier, _) = reconciler(
+        val (r, conn, probe, applier) = reconciler(
             activeRun = customContext,
             scope = backgroundScope,
         )
@@ -475,7 +427,7 @@ class RunReconcilerTest {
     // ----------------------------------------------------------------- start/stop idempotency
 
     @Test fun double_start_is_safe() = runTest {
-        val (r, _, _, _, _) = reconciler(scope = backgroundScope)
+        val (r, _, _, _) = reconciler(scope = backgroundScope)
         r.start()
         r.start() // no-op
         r.stop()

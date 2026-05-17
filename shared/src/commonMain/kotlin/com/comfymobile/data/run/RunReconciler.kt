@@ -5,8 +5,6 @@ import com.comfymobile.data.network.ConnectionState
 import com.comfymobile.data.network.ReconnectReason
 import com.comfymobile.data.network.dto.HistoryEntryDto
 import com.comfymobile.domain.job.JobOutputRef
-import com.comfymobile.domain.job.JobRepository
-import com.comfymobile.domain.job.JobStatus
 import com.comfymobile.domain.run.ActiveRunContext
 import com.comfymobile.domain.run.Clock
 import com.comfymobile.domain.run.ReconciledOutcome
@@ -83,7 +81,6 @@ class RunReconciler(
      * "active".
      */
     private val historyProbe: HistoryProbePort,
-    private val jobs: JobRepository,
     private val clock: Clock,
     private val scope: CoroutineScope,
     private val bBranchPollPeriodMs: Long = 3_000L,
@@ -194,34 +191,20 @@ class RunReconciler(
         }
     }
 
+    /**
+     * Deliver the reconciled outcome to the coordinator. Persistence
+     * is intentionally NOT performed here: the coordinator's
+     * `finalizeFromSnapshot` is the single source of truth for
+     * JobRepository writes, so the row only changes when the reducer
+     * actually commits the reconciliation. Per @Lily PR #34 review
+     * msg `4996df44` blocker 2: a stale/missing /history outcome must
+     * NOT overwrite a Job row already settled by a real WS terminal.
+     */
     private suspend fun applyTerminal(
         context: ActiveRunContext,
         outcome: ReconciledOutcome,
     ) {
-        // The coordinator's snapshot.terminal-already-set guard inside
-        // its reducer suppresses the apply if a WS event already
-        // delivered a terminal. Either way we update the persisted Job
-        // row so history reflects truth.
         applyReconciledTerminal(context.promptId, outcome)
-        // Persist the row even if the coordinator rejected the signal
-        // (e.g. a server terminal arrived first and beat us — but then
-        // its WS-driven path also updated the row, so we'd be writing
-        // the same status; the repo's updateStatus is idempotent).
-        val now = clock.nowEpochMs()
-        val (status, firstOutput) = when (outcome) {
-            is ReconciledOutcome.Succeeded ->
-                JobStatus.SUCCEEDED to outcome.outputs.firstOrNull()
-            is ReconciledOutcome.Failed -> JobStatus.FAILED to null
-            ReconciledOutcome.Interrupted -> JobStatus.INTERRUPTED to null
-        }
-        jobs.updateStatus(
-            promptId = context.promptId,
-            status = status,
-            finishedAtEpochMs = now,
-        )
-        if (firstOutput != null) {
-            jobs.updateFirstOutput(promptId = context.promptId, firstOutput = firstOutput)
-        }
     }
 
     // ----------------------------------------------------------------- classification

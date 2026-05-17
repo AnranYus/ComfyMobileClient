@@ -410,7 +410,6 @@ fun appModule(): Module = module {
             applyReconciledTerminal = coordinator::applyReconciledTerminal,
             connectionState = get<ConnectionStateMachineFacade>().currentState,
             historyProbe = get(),
-            jobs = get(),
             clock = get(),
             scope = get(qualifier = APP_SCOPE),
         )

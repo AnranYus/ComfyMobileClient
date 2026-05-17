@@ -73,6 +73,17 @@ class RunCoordinator(
     private val converter: WorkflowConverter,
     private val jobs: JobRepository,
     private val clock: Clock,
+    /**
+     * After the WS event stream errors or completes WITHOUT a terminal
+     * event, how long to keep the reducer alive waiting for a
+     * reconciled terminal (e.g. from the B/C `/history` reconciler).
+     * Past this window, the coordinator synthesises a
+     * `Failure(Network)` terminal so the user isn't stuck on a
+     * permanent "running" indicator. Default 60s covers B-branch
+     * 30s + a comfortable buffer for the reconciler's last probe to
+     * complete (per @Lily PR #34 review msg `4996df44` blocker 1).
+     */
+    private val reconciliationGraceMs: Long = 60_000L,
 ) {
 
     private val _state = MutableStateFlow<RunState>(RunState.Idle)
@@ -440,6 +451,38 @@ class RunCoordinator(
 
         var snapshot = MachineSnapshot(promptId = promptId)
         var wsError: Throwable? = null
+        // Explicitly fully-qualified to avoid a name clash with
+        // [com.comfymobile.domain.job.Job] (the data class) imported
+        // earlier in this file.
+        var graceJob: kotlinx.coroutines.Job? = null
+
+        // After WS loss, we don't finalize immediately. Per @Lily PR
+        // #34 review msg `4996df44` blocker 1: the B/C `/history`
+        // reconciler needs the coordinator to STAY active so it can
+        // deliver a Reconciled terminal. We arm a single grace timer
+        // when the WS first drops; if no terminal (reconciled or
+        // otherwise) arrives within the grace window, the timer
+        // synthesises Force(Failure(Network)) so the run still
+        // terminates and the user isn't stuck on a permanent
+        // "running" indicator.
+        fun armGraceTimerIfNotArmed(causeFromWs: Throwable?) {
+            if (graceJob != null) return
+            graceJob = launch {
+                kotlinx.coroutines.delay(reconciliationGraceMs)
+                inputs.trySend(
+                    MachineInput.Force(
+                        Terminal.Failure(
+                            RunError.Network(
+                                causeFromWs
+                                    ?: IllegalStateException(
+                                        "WS closed and no reconciliation within ${reconciliationGraceMs}ms"
+                                    )
+                            )
+                        )
+                    )
+                )
+            }
+        }
 
         try {
             for (input in inputs) {
@@ -449,16 +492,20 @@ class RunCoordinator(
                         snapshot = next
                     }
                     is MachineInput.Force -> {
+                        // Idempotency: if a terminal was already set
+                        // (e.g. by reconciliation), the grace timer's
+                        // synthetic Force should not override.
+                        if (snapshot.terminal != null) continue
                         snapshot = snapshot.copy(terminal = input.terminal)
                     }
                     is MachineInput.Reconciled -> {
-                        // Reconciled terminals from a side-channel (e.g.
-                        // /history probe after a network drop) inject
-                        // outputs along with the terminal so a Succeeded
-                        // case still has the outputs to surface. The
-                        // existing snapshot.terminal-already-set guard
-                        // in the outer loop prevents overriding a real
-                        // server-driven terminal that arrived first.
+                        // Reconciled terminals from a side-channel
+                        // (e.g. /history probe after a network drop)
+                        // inject outputs along with the terminal so a
+                        // Succeeded case still has the outputs to
+                        // surface. The snapshot.terminal-already-set
+                        // guard prevents overriding a real server-
+                        // driven terminal that arrived first.
                         if (snapshot.terminal != null) continue
                         val outputs = snapshot.outputs + input.reconciledOutputs.filter { ref ->
                             snapshot.outputs.none { it.filename == ref.filename && it.subfolder == ref.subfolder && it.type == ref.type }
@@ -470,15 +517,14 @@ class RunCoordinator(
                         )
                     }
                     is MachineInput.WsCompleted -> {
-                        // Server closed /ws politely without a terminal event.
-                        // Fall through to the post-loop "no terminal" branch
-                        // which finalizes as Failed(Network).
-                        if (snapshot.terminal == null) break
+                        // Don't break the loop. Arm grace timer and
+                        // keep listening for Reconciled / Force.
+                        if (snapshot.terminal == null) armGraceTimerIfNotArmed(causeFromWs = null)
                         continue
                     }
                     is MachineInput.WsError -> {
                         wsError = input.cause
-                        if (snapshot.terminal == null) break
+                        if (snapshot.terminal == null) armGraceTimerIfNotArmed(causeFromWs = input.cause)
                         continue
                     }
                 }
@@ -490,10 +536,11 @@ class RunCoordinator(
                 }
             }
         } finally {
-            // Cancel both fan-in jobs before returning so they don't
-            // keep collecting after we've decided on a terminal.
+            // Cancel all fan-in / timer jobs before returning so they
+            // don't keep collecting after we've decided on a terminal.
             wsJob.cancel()
             forceJob.cancel()
+            graceJob?.cancel()
             inputs.close()
         }
 
