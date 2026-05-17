@@ -5,6 +5,7 @@ import com.comfymobile.presentation.connection.LocalizedText
 
 enum class HistoryFilter {
     All,
+    Favorites,
     Successful,
     Running,
     FailedCancelled,
@@ -32,6 +33,7 @@ data class HistoryRowState(
     val relativeTime: String,
     val status: HistoryStatusPresentation,
     val thumbnailUrl: String? = null,
+    val isFavorite: Boolean = false,
     val canOpenWorkflow: Boolean = false,
 )
 
@@ -72,6 +74,7 @@ object HistoryCopy {
         en = "Connect to a server to see its generation history.",
     )
     val all = LocalizedText(zh = "全部", en = "All")
+    val favorites = LocalizedText(zh = "收藏", en = "Favorites")
     val successful = LocalizedText(zh = "成功", en = "Successful")
     val running = LocalizedText(zh = "进行中", en = "Running")
     val failedCancelled = LocalizedText(zh = "失败/取消", en = "Failed/Cancelled")
@@ -97,6 +100,7 @@ object HistoryCopy {
 
     fun filterLabel(filter: HistoryFilter): LocalizedText = when (filter) {
         HistoryFilter.All -> all
+        HistoryFilter.Favorites -> favorites
         HistoryFilter.Successful -> successful
         HistoryFilter.Running -> running
         HistoryFilter.FailedCancelled -> failedCancelled

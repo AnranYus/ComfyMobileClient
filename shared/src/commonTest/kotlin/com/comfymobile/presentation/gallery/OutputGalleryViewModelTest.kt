@@ -81,6 +81,75 @@ class OutputGalleryViewModelTest {
         assertEquals(null, vm.state.value.actionInProgress)
     }
 
+    @Test fun showRunOutputs_uses_run_outputs_and_refreshes_favorite_from_repository() = runTest {
+        val repo = InMemoryJobRepository()
+        repo.upsert(job("prompt-1", isFavorite = true))
+        val vm = viewModel(repository = repo, scope = this)
+
+        vm.showRunOutputs(
+            promptId = "prompt-1",
+            outputs = listOf(
+                JobOutputRef("one.png", "", "output"),
+                JobOutputRef("two.png", "batch", "output"),
+            ),
+            title = "Fresh run",
+        )
+        runCurrent()
+
+        assertEquals("Fresh run", vm.state.value.title)
+        assertEquals(listOf("one.png", "two.png"), vm.state.value.items.map { it.ref.filename })
+        assertEquals(true, vm.state.value.isFavorite)
+        assertEquals("prompt-1", vm.state.value.promptId)
+    }
+
+    @Test fun showPrompt_loads_stable_history_source_from_repository() = runTest {
+        val repo = InMemoryJobRepository()
+        repo.upsert(
+            job(
+                promptId = "prompt-1",
+                label = "History row",
+                firstOutput = JobOutputRef("history.png", "archive", "output"),
+                isFavorite = true,
+            ),
+        )
+        val vm = viewModel(repository = repo, scope = this)
+
+        vm.showPrompt("prompt-1")
+        runCurrent()
+
+        assertEquals("History row", vm.state.value.title)
+        assertEquals("history.png", vm.state.value.items.single().ref.filename)
+        assertEquals("archive", vm.state.value.items.single().ref.subfolder)
+        assertEquals(true, vm.state.value.isFavorite)
+    }
+
+    @Test fun stale_showPrompt_result_does_not_mutate_new_gallery_session() = runTest {
+        val repo = DelayedLookupRepository()
+        repo.upsert(
+            job(
+                promptId = "prompt-a",
+                firstOutput = JobOutputRef("a.png", "", "output"),
+                isFavorite = true,
+            ),
+        )
+        val vm = viewModel(repository = repo, scope = this)
+
+        vm.showPrompt("prompt-a")
+        repo.lookupStarted.await()
+
+        vm.showRunOutputs(
+            promptId = "prompt-b",
+            outputs = listOf(JobOutputRef("b.png", "", "output")),
+            title = "Current",
+        )
+        repo.allowLookup.complete(Unit)
+        runCurrent()
+
+        assertEquals("prompt-b", vm.state.value.promptId)
+        assertEquals("b.png", vm.state.value.items.single().ref.filename)
+        assertEquals(false, vm.state.value.isFavorite)
+    }
+
     @Test fun favorite_stays_disabled_without_prompt_id() = runTest {
         val repo = InMemoryJobRepository()
         val vm = viewModel(repository = repo, scope = this)
@@ -147,10 +216,18 @@ class OutputGalleryViewModelTest {
             scope = scope,
         )
 
-    private fun job(promptId: String): Job = Job(
+    private fun job(
+        promptId: String,
+        label: String? = null,
+        firstOutput: JobOutputRef? = null,
+        isFavorite: Boolean = false,
+    ): Job = Job(
         promptId = promptId,
         serverId = "srv-A",
         status = JobStatus.SUCCEEDED,
+        label = label,
+        firstOutput = firstOutput,
+        isFavorite = isFavorite,
         createdAtEpochMs = 1L,
     )
 
@@ -183,6 +260,59 @@ class OutputGalleryViewModelTest {
 
         override suspend fun getByPromptId(promptId: String): Job? =
             delegate.getByPromptId(promptId)
+
+        override suspend fun listByServer(serverId: String, limit: Int, offset: Int): List<Job> =
+            delegate.listByServer(serverId, limit, offset)
+
+        override fun observeByServer(serverId: String, limit: Int, offset: Int): Flow<List<Job>> =
+            delegate.observeByServer(serverId, limit, offset)
+
+        override suspend fun listInFlight(serverId: String): List<Job> =
+            delegate.listInFlight(serverId)
+
+        override suspend fun deleteByServer(serverId: String) {
+            delegate.deleteByServer(serverId)
+        }
+
+        override suspend fun deleteByPromptId(promptId: String) {
+            delegate.deleteByPromptId(promptId)
+        }
+
+        override suspend fun deleteAll() {
+            delegate.deleteAll()
+        }
+    }
+
+    private class DelayedLookupRepository : JobRepository {
+        private val delegate = InMemoryJobRepository()
+        val lookupStarted = CompletableDeferred<Unit>()
+        val allowLookup = CompletableDeferred<Unit>()
+
+        override suspend fun upsert(job: Job) {
+            delegate.upsert(job)
+        }
+
+        override suspend fun updateStatus(promptId: String, status: JobStatus, finishedAtEpochMs: Long?) {
+            delegate.updateStatus(promptId, status, finishedAtEpochMs)
+        }
+
+        override suspend fun updateLabel(promptId: String, label: String?) {
+            delegate.updateLabel(promptId, label)
+        }
+
+        override suspend fun updateFirstOutput(promptId: String, firstOutput: JobOutputRef?) {
+            delegate.updateFirstOutput(promptId, firstOutput)
+        }
+
+        override suspend fun updateFavorite(promptId: String, isFavorite: Boolean) {
+            delegate.updateFavorite(promptId, isFavorite)
+        }
+
+        override suspend fun getByPromptId(promptId: String): Job? {
+            lookupStarted.complete(Unit)
+            allowLookup.await()
+            return delegate.getByPromptId(promptId)
+        }
 
         override suspend fun listByServer(serverId: String, limit: Int, offset: Int): List<Job> =
             delegate.listByServer(serverId, limit, offset)

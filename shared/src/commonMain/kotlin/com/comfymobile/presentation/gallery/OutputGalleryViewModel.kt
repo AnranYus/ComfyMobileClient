@@ -4,6 +4,8 @@ import com.comfymobile.data.image.ComfyImageMapper
 import com.comfymobile.data.image.ComfyOutputRef
 import com.comfymobile.data.image.PreviewFormat
 import com.comfymobile.data.image.PreviewSpec
+import com.comfymobile.domain.job.Job
+import com.comfymobile.domain.job.JobOutputRef
 import com.comfymobile.domain.job.JobRepository
 import com.comfymobile.presentation.connection.ConnectionLanguage
 import kotlinx.coroutines.CancellationException
@@ -21,6 +23,7 @@ class OutputGalleryViewModel(
     private val language: ConnectionLanguage = ConnectionLanguage.En,
 ) {
     private var galleryGeneration: Long = 0L
+    private var latestSourceRequestId: Long = 0L
     private var latestActionId: Long = 0L
 
     private val mutableState = MutableStateFlow(
@@ -53,6 +56,7 @@ class OutputGalleryViewModel(
         promptId: String? = null,
         isFavorite: Boolean = false,
     ) {
+        latestSourceRequestId += 1L
         galleryGeneration += 1L
         val items = OutputGalleryMapper.items(
             outputs = outputs,
@@ -71,6 +75,45 @@ class OutputGalleryViewModel(
             isFavorite = isFavorite,
             language = language,
         ).withActionAvailability()
+    }
+
+    fun showRunOutputs(
+        promptId: String,
+        outputs: List<JobOutputRef>,
+        title: String = OutputGalleryCopy.title.resolve(language),
+        metadata: OutputMetadata = OutputMetadata(),
+    ) {
+        val mappedOutputs = outputs.map { it.toComfyOutputRef() }
+        show(
+            outputs = mappedOutputs,
+            title = title,
+            metadata = metadata,
+            promptId = promptId,
+            isFavorite = false,
+        )
+        refreshFavorite(promptId = promptId, generation = galleryGeneration)
+    }
+
+    fun showPrompt(promptId: String) {
+        val repository = jobRepository ?: return
+        val targetScope = scope ?: return
+        val requestId = ++latestSourceRequestId
+        targetScope.launch {
+            val job = try {
+                repository.getByPromptId(promptId)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Throwable) {
+                null
+            } ?: return@launch
+            if (requestId != latestSourceRequestId) return@launch
+            show(
+                outputs = job.outputsForGallery(),
+                title = job.galleryTitle(),
+                promptId = job.promptId,
+                isFavorite = job.isFavorite,
+            )
+        }
     }
 
     fun close() {
@@ -136,6 +179,22 @@ class OutputGalleryViewModel(
         }
     }
 
+    private fun refreshFavorite(promptId: String, generation: Long) {
+        val repository = jobRepository ?: return
+        val targetScope = scope ?: return
+        targetScope.launch {
+            val job = try {
+                repository.getByPromptId(promptId)
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (_: Throwable) {
+                null
+            } ?: return@launch
+            if (galleryGeneration != generation || mutableState.value.promptId != promptId) return@launch
+            mutableState.value = mutableState.value.copy(isFavorite = job.isFavorite).withActionAvailability()
+        }
+    }
+
     private fun launchAction(
         action: OutputGalleryAction,
         session: GallerySession,
@@ -193,4 +252,17 @@ class OutputGalleryViewModel(
 
     private val ComfyOutputRef.identityKey: String
         get() = "$type/$subfolder/$filename"
+
+    private fun Job.outputsForGallery(): List<ComfyOutputRef> =
+        listOfNotNull(firstOutput?.toComfyOutputRef())
+
+    private fun Job.galleryTitle(): String =
+        label?.takeIf { it.isNotBlank() } ?: OutputGalleryCopy.title.resolve(language)
+
+    private fun JobOutputRef.toComfyOutputRef(): ComfyOutputRef =
+        ComfyOutputRef(
+            filename = filename,
+            subfolder = subfolder,
+            type = type,
+        )
 }

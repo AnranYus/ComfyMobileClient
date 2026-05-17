@@ -42,9 +42,9 @@ import com.comfymobile.domain.workflow.WorkflowRepository
 import com.comfymobile.presentation.history.ComfyHistoryThumbnailMapper
 import com.comfymobile.presentation.history.HistoryThumbnailMapper
 import com.comfymobile.presentation.history.HistoryViewModel
-import com.comfymobile.presentation.gallery.DisabledOutputGalleryActionGateway
 import com.comfymobile.presentation.gallery.OutputGalleryActionGateway
 import com.comfymobile.presentation.gallery.OutputGalleryViewModel
+import com.comfymobile.presentation.gallery.createOutputGalleryActionGateway
 import com.comfymobile.presentation.parameditor.ActiveServerParamOptionProvider
 import com.comfymobile.presentation.parameditor.ParamEditorViewModel
 import com.comfymobile.presentation.parameditor.ParamOptionProvider
@@ -146,7 +146,12 @@ fun appModule(): Module = module {
         )
     }
 
-    single<OutputGalleryActionGateway> { DisabledOutputGalleryActionGateway }
+    single<OutputGalleryActionGateway> {
+        createOutputGalleryActionGateway(
+            context = get(),
+            httpClient = get(qualifier = SHARED_HTTP_CLIENT),
+        )
+    }
 
     single<ServerHistoryStore> {
         val context = get<PlatformContext>()
