@@ -43,7 +43,7 @@ class HistoryMapperTest {
         val jobs = listOf(
             job("queued", JobStatus.QUEUED, createdAt = 4L),
             job("running", JobStatus.RUNNING, createdAt = 3L),
-            job("success", JobStatus.SUCCEEDED, createdAt = 2L, output = JobOutputRef("a.png")),
+            job("success", JobStatus.SUCCEEDED, createdAt = 2L, output = JobOutputRef("a.png"), isFavorite = true),
             job("failed", JobStatus.FAILED, createdAt = 1L),
             job("cancelled", JobStatus.INTERRUPTED, createdAt = 0L),
         )
@@ -64,6 +64,15 @@ class HistoryMapperTest {
         )
         assertEquals(listOf("success"), successful.map { it.promptId })
         assertEquals("thumb://a.png", successful.single().thumbnailUrl)
+
+        val favorites = HistoryMapper.rows(
+            jobs = jobs,
+            selectedFilter = HistoryFilter.Favorites,
+            language = ConnectionLanguage.En,
+            nowEpochMs = 5_000L,
+        )
+        assertEquals(listOf("success"), favorites.map { it.promptId })
+        assertEquals(true, favorites.single().isFavorite)
     }
 
     @Test fun relativeTime_matches_spec_short_forms() {
@@ -77,12 +86,14 @@ class HistoryMapperTest {
         status: JobStatus,
         createdAt: Long,
         output: JobOutputRef? = null,
+        isFavorite: Boolean = false,
     ): Job = Job(
         promptId = promptId,
         serverId = "srv-A",
         status = status,
         label = promptId,
         firstOutput = output,
+        isFavorite = isFavorite,
         apiPromptJson = """{"1":{"inputs":{"text":"prompt for $promptId"}}}""",
         createdAtEpochMs = createdAt,
     )

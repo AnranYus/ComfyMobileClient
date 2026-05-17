@@ -40,6 +40,7 @@ object HistoryMapper {
                     relativeTime = relativeTime(job.createdAtEpochMs, nowEpochMs, language),
                     status = status(job.status),
                     thumbnailUrl = job.firstOutput?.let { thumbnailMapper.map(it) },
+                    isFavorite = job.isFavorite,
                     canOpenWorkflow = !job.workflowSnapshotJson.isNullOrBlank(),
                 )
             }
@@ -111,6 +112,7 @@ object HistoryMapper {
 
     private fun Job.matches(filter: HistoryFilter): Boolean = when (filter) {
         HistoryFilter.All -> true
+        HistoryFilter.Favorites -> isFavorite
         HistoryFilter.Successful -> status == JobStatus.SUCCEEDED
         HistoryFilter.Running -> status == JobStatus.QUEUED || status == JobStatus.RUNNING
         HistoryFilter.FailedCancelled -> status == JobStatus.FAILED || status == JobStatus.INTERRUPTED

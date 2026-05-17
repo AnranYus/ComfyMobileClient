@@ -81,6 +81,7 @@ kotlin {
         }
         androidMain.dependencies {
             implementation(libs.androidx.activity.compose)
+            implementation(libs.androidx.core.ktx)
             implementation(libs.androidx.lifecycle.process)
             implementation(libs.kotlinx.coroutines.android)
             implementation(libs.ktor.client.okhttp)

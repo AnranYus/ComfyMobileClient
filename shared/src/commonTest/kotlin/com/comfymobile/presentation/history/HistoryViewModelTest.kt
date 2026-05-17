@@ -78,6 +78,26 @@ class HistoryViewModelTest {
         }
     }
 
+    @Test fun favorites_filter_shows_only_favorited_rows() = runTest {
+        val repo = InMemoryJobRepository()
+        val active = ActiveServerHolder()
+        active.setActive(server("srv-A"))
+        repo.upsert(job("p-fav", status = JobStatus.SUCCEEDED, serverId = "srv-A", isFavorite = true))
+        repo.upsert(job("p-normal", status = JobStatus.SUCCEEDED, serverId = "srv-A"))
+        val vm = viewModel(repo, active, this)
+
+        try {
+            runCurrent()
+            vm.onFilterSelected(HistoryFilter.Favorites)
+            runCurrent()
+
+            assertEquals(listOf("p-fav"), vm.state.value.rows.map { it.promptId })
+            assertEquals(HistoryFilter.Favorites, vm.state.value.selectedFilter)
+        } finally {
+            coroutineContext.cancelChildren()
+        }
+    }
+
     @Test fun no_active_server_renders_empty_disconnected_state() = runTest {
         val repo = InMemoryJobRepository()
         val active = ActiveServerHolder()
@@ -116,11 +136,13 @@ class HistoryViewModelTest {
         status: JobStatus,
         serverId: String,
         createdAt: Long = 1L,
+        isFavorite: Boolean = false,
     ): Job = Job(
         promptId = promptId,
         serverId = serverId,
         status = status,
         label = promptId,
+        isFavorite = isFavorite,
         apiPromptJson = """{"1":{"inputs":{"text":"prompt for $promptId"}}}""",
         createdAtEpochMs = createdAt,
     )
