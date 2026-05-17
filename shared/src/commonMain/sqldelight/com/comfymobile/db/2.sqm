@@ -1,0 +1,13 @@
+CREATE TABLE workflow (
+    id TEXT NOT NULL PRIMARY KEY,
+    friendly_name TEXT NOT NULL,
+    format TEXT NOT NULL,
+    original_json TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    imported_at INTEGER NOT NULL,
+    last_opened_at INTEGER,
+    last_run_prompt_id TEXT
+);
+
+CREATE INDEX workflow_recents
+    ON workflow(last_opened_at DESC, imported_at DESC);

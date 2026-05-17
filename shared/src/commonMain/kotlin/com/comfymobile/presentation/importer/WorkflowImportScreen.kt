@@ -37,6 +37,7 @@ import org.jetbrains.compose.ui.tooling.preview.Preview
 fun WorkflowImportRoute(
     viewModel: WorkflowImportViewModel,
     modifier: Modifier = Modifier,
+    showFab: Boolean = true,
 ) {
     val state by viewModel.state.collectAsState()
     val actions = viewModel.actions()
@@ -50,6 +51,7 @@ fun WorkflowImportRoute(
         actions = actions,
         gateway = gateway,
         modifier = modifier,
+        showFab = showFab,
     )
 }
 
@@ -59,15 +61,18 @@ fun WorkflowImportOverlay(
     actions: WorkflowImportActions,
     gateway: PlatformWorkflowImportGateway,
     modifier: Modifier = Modifier,
+    showFab: Boolean = true,
 ) {
     Box(modifier = modifier) {
-        ExtendedFloatingActionButton(
-            onClick = actions.onOpenSheet,
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(20.dp),
-        ) {
-            Text(ImportCopy.importWorkflow.resolve(state.language))
+        if (showFab) {
+            ExtendedFloatingActionButton(
+                onClick = actions.onOpenSheet,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(20.dp),
+            ) {
+                Text(ImportCopy.importWorkflow.resolve(state.language))
+            }
         }
 
         if (state.isParsing) {

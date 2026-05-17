@@ -79,6 +79,21 @@ class InMemoryWorkflowRepositoryTest {
         )
     }
 
+    @Test fun markOpened_updates_recency_without_changing_import_time() = runTest {
+        val repository = InMemoryWorkflowRepository()
+        val old = repository.upsert(envelope(label = "Old", createdAt = 100L, marker = "old"))
+        val new = repository.upsert(envelope(label = "New", createdAt = 200L, marker = "new"))
+
+        val opened = repository.markOpened(old.workflowId, openedAtEpochMs = 300L)
+
+        assertEquals(old.importedAtEpochMs, opened?.importedAtEpochMs)
+        assertEquals(300L, opened?.lastOpenedAtEpochMs)
+        assertEquals(
+            listOf(old.workflowId, new.workflowId),
+            repository.listRecents().map { it.workflowId },
+        )
+    }
+
     @Test fun delete_removes_workflow() = runTest {
         val repository = InMemoryWorkflowRepository()
         val row = repository.upsert(envelope(label = "Delete me", createdAt = 100L))

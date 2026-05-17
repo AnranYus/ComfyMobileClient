@@ -11,9 +11,9 @@ import com.comfymobile.data.network.ComfyWebSocketClient
 import com.comfymobile.data.network.ConnectionEffectRunner
 import com.comfymobile.data.network.ConnectionStateReducer
 import com.comfymobile.data.network.WebSocketSource
-import com.comfymobile.data.persistence.InMemoryWorkflowRepository
 import com.comfymobile.data.persistence.SettingsServerHistoryStore
 import com.comfymobile.data.persistence.SqlDelightJobRepository
+import com.comfymobile.data.persistence.SqlDelightWorkflowRepository
 import com.comfymobile.data.platform.PlatformContext
 import com.comfymobile.data.platform.createSettings
 import com.comfymobile.data.platform.createSqlDriver
@@ -51,6 +51,7 @@ import com.comfymobile.presentation.gallery.createOutputGalleryActionGateway
 import com.comfymobile.presentation.parameditor.ActiveServerParamOptionProvider
 import com.comfymobile.presentation.parameditor.ParamEditorViewModel
 import com.comfymobile.presentation.parameditor.ParamOptionProvider
+import com.comfymobile.presentation.library.WorkflowLibraryViewModel
 import com.comfymobile.presentation.run.RunViewModel
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
@@ -110,7 +111,7 @@ fun appModule(): Module = module {
         ComfyMobileDb(driver = createSqlDriver(context))
     }
     single<JobRepository> { SqlDelightJobRepository(db = get()) }
-    single<WorkflowRepository> { InMemoryWorkflowRepository() }
+    single<WorkflowRepository> { SqlDelightWorkflowRepository(db = get()) }
 
     factory<WorkflowImporter> {
         WorkflowImporter(
@@ -312,6 +313,16 @@ fun appModule(): Module = module {
             scope = vmScope,
             nowEpochMs = { nowEpochMs() },
             thumbnailMapper = get(),
+        )
+    }
+
+    factory<WorkflowLibraryViewModel> { (vmScope: CoroutineScope) ->
+        WorkflowLibraryViewModel(
+            repository = get(),
+            activeServer = get(),
+            connectionState = get<ConnectionStateMachineFacade>().currentState,
+            scope = vmScope,
+            nowEpochMs = { nowEpochMs() },
         )
     }
 

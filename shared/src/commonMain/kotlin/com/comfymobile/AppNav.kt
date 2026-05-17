@@ -43,3 +43,16 @@ internal sealed interface AppScreen {
         val outputs: List<JobOutputRef>,
     ) : AppScreen
 }
+
+internal fun canShowRunShortcut(
+    selectedWorkflowId: String?,
+    hasActiveServer: Boolean,
+    screen: AppScreen,
+): Boolean = selectedWorkflowId != null &&
+    hasActiveServer &&
+    screen is AppScreen.Idle
+
+internal fun shouldClearSelectedWorkflowAfterDelete(
+    selectedWorkflowId: String?,
+    deletedWorkflowId: String,
+): Boolean = selectedWorkflowId == deletedWorkflowId
