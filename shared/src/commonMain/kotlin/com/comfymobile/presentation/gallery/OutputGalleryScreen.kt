@@ -309,14 +309,24 @@ private fun OutputActionRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        OutlinedButton(onClick = {}, enabled = false) {
+        OutlinedButton(
+            onClick = actions.onSaveSelected,
+            enabled = state.saveEnabled,
+        ) {
             Text(OutputGalleryCopy.save.resolve(state.language))
         }
-        OutlinedButton(onClick = {}, enabled = false) {
+        OutlinedButton(
+            onClick = actions.onShareSelected,
+            enabled = state.shareEnabled,
+        ) {
             Text(OutputGalleryCopy.share.resolve(state.language))
         }
-        OutlinedButton(onClick = {}, enabled = false) {
-            Text(OutputGalleryCopy.favorite.resolve(state.language))
+        OutlinedButton(
+            onClick = actions.onToggleFavorite,
+            enabled = state.favoriteEnabled,
+        ) {
+            val copy = if (state.isFavorite) OutputGalleryCopy.favorited else OutputGalleryCopy.favorite
+            Text(copy.resolve(state.language))
         }
         FilledTonalButton(onClick = actions.onRunAgain) {
             Text(OutputGalleryCopy.runAgain.resolve(state.language))
@@ -447,6 +457,9 @@ private fun OutputGalleryScreenPreview() {
                 onToggleMetadata = {},
                 onLongPressItem = {},
                 onToggleBatchSelection = {},
+                onSaveSelected = {},
+                onShareSelected = {},
+                onToggleFavorite = {},
                 onRunAgain = {},
                 onTweakAndRun = {},
                 onViewWorkflow = {},
