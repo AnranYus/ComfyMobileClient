@@ -86,11 +86,13 @@ class RunCoordinatorTest {
     ) : PromptSubmissionPort {
         var lastRequest: PromptRequestDto? = null
         val requests: MutableList<PromptRequestDto> = mutableListOf()
+        val baseUrls: MutableList<String> = mutableListOf()
         var calls: Int = 0
-        override suspend fun submit(request: PromptRequestDto): PromptResponseDto {
+        override suspend fun submit(baseUrl: String, request: PromptRequestDto): PromptResponseDto {
             calls += 1
             lastRequest = request
             requests += request
+            baseUrls += baseUrl
             throwOnSubmit?.let { throw it }
             return sequencedResponses?.getOrElse(calls - 1) { sequencedResponses.last() }
                 ?: response
@@ -98,10 +100,20 @@ class RunCoordinatorTest {
     }
 
     private class RecordingCancel : CancelPort {
-        var interruptCalls = mutableListOf<String>()
-        var deleteCalls = mutableListOf<String>()
-        override suspend fun interruptRunning(promptId: String) { interruptCalls += promptId }
-        override suspend fun deleteQueued(promptId: String) { deleteCalls += promptId }
+        // Each list records (baseUrl, promptId) pairs so tests can verify
+        // BOTH the route AND the server context the cancel went to.
+        val interruptCalls = mutableListOf<Pair<String, String>>()
+        val deleteCalls = mutableListOf<Pair<String, String>>()
+        override suspend fun interruptRunning(baseUrl: String, promptId: String) {
+            interruptCalls += baseUrl to promptId
+        }
+        override suspend fun deleteQueued(baseUrl: String, promptId: String) {
+            deleteCalls += baseUrl to promptId
+        }
+
+        /** Convenience for legacy assertions that only care about promptIds. */
+        val interruptPromptIds: List<String> get() = interruptCalls.map { it.second }
+        val deletePromptIds: List<String> get() = deleteCalls.map { it.second }
     }
 
     /**
@@ -123,10 +135,13 @@ class RunCoordinatorTest {
     private class ChannelWs : WsEventPort {
         val sessions: MutableList<Channel<WsEvent>> = mutableListOf()
         val clientIds: MutableList<String> = mutableListOf()
+        val baseUrls: MutableList<String> = mutableListOf()
         val lastClientId: String? get() = clientIds.lastOrNull()
+        val lastBaseUrl: String? get() = baseUrls.lastOrNull()
 
-        override fun events(clientId: String): Flow<WsEvent> {
+        override fun events(baseUrl: String, clientId: String): Flow<WsEvent> {
             clientIds += clientId
+            baseUrls += baseUrl
             val session = Channel<WsEvent>(capacity = Channel.UNLIMITED)
             sessions += session
             return session.consumeAsFlow()
@@ -161,14 +176,18 @@ class RunCoordinatorTest {
         clock = clock,
     ) to jobs
 
-    private fun submission(serverId: String = "srv-1", promptId: String = "client-1") =
-        RunSubmission(
-            serverId = serverId,
-            clientId = promptId,
-            workflowUi = minimalUi(),
-            workflowSnapshotJson = "{\"raw\":\"snapshot\"}",
-            label = "test-run",
-        )
+    private fun submission(
+        serverId: String = "srv-1",
+        baseUrl: String = "http://srv-1.local:8188",
+        promptId: String = "client-1",
+    ) = RunSubmission(
+        serverId = serverId,
+        baseUrl = baseUrl,
+        clientId = promptId,
+        workflowUi = minimalUi(),
+        workflowSnapshotJson = "{\"raw\":\"snapshot\"}",
+        label = "test-run",
+    )
 
     // ----------------------------------------------------------------- happy path
 
@@ -347,8 +366,8 @@ class RunCoordinatorTest {
         val route = c.requestCancel()
         val r = assertIs<CancelRoute.DeleteQueued>(route)
         assertEquals("p-1", r.promptId)
-        assertEquals(listOf("p-1"), cancel.deleteCalls)
-        assertEquals(emptyList<String>(), cancel.interruptCalls)
+        assertEquals(listOf("p-1"), cancel.deletePromptIds)
+        assertEquals(emptyList<String>(), cancel.interruptPromptIds)
 
         // Per @Lily PR #30 review msg `49b81084`: ComfyUI does NOT emit
         // execution_interrupted for queued prompts deleted from the queue
@@ -397,7 +416,7 @@ class RunCoordinatorTest {
         val cancelled = assertIs<RunState.Cancelled>(terminal)
         assertEquals("p-1", cancelled.promptId)
         assertEquals(JobStatus.INTERRUPTED, jobs.getByPromptId("p-1")!!.status)
-        assertEquals(listOf("p-1"), cancel.deleteCalls)
+        assertEquals(listOf("p-1"), cancel.deletePromptIds)
     }
 
     @Test fun requestCancel_in_Running_state_routes_to_InterruptRunning_and_waits_for_server_event() = runTest {
@@ -415,8 +434,8 @@ class RunCoordinatorTest {
         val route = c.requestCancel()
         val r = assertIs<CancelRoute.InterruptRunning>(route)
         assertEquals("p-1", r.promptId)
-        assertEquals(listOf("p-1"), cancel.interruptCalls)
-        assertEquals(emptyList<String>(), cancel.deleteCalls)
+        assertEquals(listOf("p-1"), cancel.interruptPromptIds)
+        assertEquals(emptyList<String>(), cancel.deletePromptIds)
 
         // For Running cancel, ComfyUI DOES emit execution_interrupted via WS
         // (the prompt was executing). Run loop waits for that event.
@@ -432,8 +451,8 @@ class RunCoordinatorTest {
         val (c, _) = coord(cancel = cancel)
 
         assertNull(c.requestCancel())
-        assertEquals(emptyList<String>(), cancel.interruptCalls)
-        assertEquals(emptyList<String>(), cancel.deleteCalls)
+        assertEquals(emptyList<String>(), cancel.interruptPromptIds)
+        assertEquals(emptyList<String>(), cancel.deletePromptIds)
     }
 
     @Test fun requestCancel_after_terminal_is_noop() = runTest {
@@ -455,8 +474,8 @@ class RunCoordinatorTest {
         deferred.await()
 
         assertNull(c.requestCancel())
-        assertEquals(emptyList<String>(), cancel.interruptCalls)
-        assertEquals(emptyList<String>(), cancel.deleteCalls)
+        assertEquals(emptyList<String>(), cancel.interruptPromptIds)
+        assertEquals(emptyList<String>(), cancel.deletePromptIds)
     }
 
     // ----------------------------------------------------------------- WS closes without terminal
@@ -615,5 +634,78 @@ class RunCoordinatorTest {
         ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1"))
         withTimeout(1_000) { deferred.await() }
         assertIs<RunState.Cancelled>(c.state.value)
+    }
+
+    /**
+     * @Lily PR #31 second-round regression (msg `8bbd4fa1` blocker 1):
+     *
+     * A run submitted against server A must continue talking to server
+     * A for its WS subscription AND its cancel call, EVEN IF the user
+     * switches the active server to B mid-run. The previous adapter
+     * design read [ActiveServerHolder.current] inside each port method,
+     * so switching active server mid-run silently retargeted the WS
+     * subscription and cancel endpoints to B.
+     *
+     * This test simulates a mid-run "active server switch" by calling
+     * the coordinator with a different baseUrl in a second submission
+     * and verifying:
+     *   - The FIRST run's WS subscription is on server A (lastBaseUrl
+     *     captured at the time we issued the first run).
+     *   - The FIRST run's cancel routes to server A's baseUrl, not to
+     *     whatever's "active" at cancel time. The cancel port records
+     *     (baseUrl, promptId); we assert the baseUrl pair matches A.
+     */
+    @Test fun mid_run_active_server_switch_does_not_redirect_cancel_or_ws() = runTest {
+        val prompt = RecordingPrompt()
+        val cancel = RecordingCancel()
+        val ws = ChannelWs()
+        val (c, _) = coord(prompt = prompt, cancel = cancel, ws = ws)
+
+        val baseUrlA = "http://server-A:8188"
+        val deferred = async(Dispatchers.Unconfined) {
+            c.run(submission(serverId = "A", baseUrl = baseUrlA))
+        }
+        c.state.first { it is RunState.Queued }
+        // WS subscribed with server A.
+        assertEquals(baseUrlA, ws.lastBaseUrl)
+        // Submit went to server A.
+        assertEquals(listOf(baseUrlA), prompt.baseUrls)
+
+        // (The "active server switch" is implicit: the coordinator's
+        // ports get baseUrl from the submission, not from any shared
+        // ActiveServerHolder. If a higher layer's active server changes,
+        // it does not propagate down to this run.)
+
+        // Cancel during Queued must route to server A.
+        ws.send(WsEvent.ExecutionStart(promptId = "p-1"))
+        ws.send(WsEvent.Executing(promptId = "p-1", node = "1"))
+        c.state.first { it is RunState.Running }
+
+        val route = c.requestCancel()
+        assertIs<CancelRoute.InterruptRunning>(route)
+        assertEquals(listOf(baseUrlA to "p-1"), cancel.interruptCalls)
+
+        ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1", nodeId = "1"))
+        withTimeout(1_000) { deferred.await() }
+    }
+
+    @Test fun queued_cancel_routes_to_run_baseUrl_not_a_global_active_server() = runTest {
+        val cancel = RecordingCancel()
+        val ws = ChannelWs()
+        val (c, _) = coord(cancel = cancel, ws = ws)
+
+        val baseUrlA = "http://server-A:8188"
+        val deferred = async(Dispatchers.Unconfined) {
+            c.run(submission(serverId = "A", baseUrl = baseUrlA))
+        }
+        c.state.first { it is RunState.Queued }
+
+        val route = c.requestCancel()
+        assertIs<CancelRoute.DeleteQueued>(route)
+        // Queued cancel hits server A's /queue, never some other server.
+        assertEquals(listOf(baseUrlA to "p-1"), cancel.deleteCalls)
+        assertEquals(emptyList<Pair<String, String>>(), cancel.interruptCalls)
+
+        withTimeout(1_000) { deferred.await() }
     }
 }

@@ -19,8 +19,14 @@ import kotlinx.coroutines.flow.Flow
  */
 
 /**
- * `POST /prompt` — workflow submission. Returns the accepted prompt id
- * and the per-node validation error map (empty on full acceptance).
+ * `POST /prompt` — workflow submission to a *specific* baseUrl.
+ *
+ * The `baseUrl` parameter is required (not derived from a global active
+ * server holder) per @Lily PR #31 review msg `8bbd4fa1` blocker 1:
+ * one run is bound to one server, and a mid-run active-server switch
+ * must NOT redirect cancel/WS calls to a different server. The
+ * coordinator snapshots the baseUrl from `RunSubmission` at submit
+ * time and passes it through every port call for that run.
  *
  * Failure modes:
  *  - Non-2xx HTTP: throw [com.comfymobile.data.network.ComfyHttpException.HttpStatus].
@@ -31,7 +37,7 @@ import kotlinx.coroutines.flow.Flow
  * [RunError.ValidationFailed] instead.
  */
 fun interface PromptSubmissionPort {
-    suspend fun submit(request: PromptRequestDto): PromptResponseDto
+    suspend fun submit(baseUrl: String, request: PromptRequestDto): PromptResponseDto
 }
 
 /**
@@ -46,22 +52,30 @@ fun interface PromptSubmissionPort {
  * They are separate methods (not a single boolean-flagged call) per
  * @Lily T2.3 verification points (msg `cd56665a`) and the underlying
  * `ComfyHttpClient` separation (T1.1 part 2a, msg `1fa6de6f`).
+ *
+ * `baseUrl` is passed per call so the coordinator can route the cancel
+ * to the same server the run was submitted on, even if the user has
+ * since switched the active server (per @Lily PR #31 msg `8bbd4fa1`).
  */
 interface CancelPort {
 
-    /** Cancel the currently-running prompt. */
-    suspend fun interruptRunning(promptId: String)
+    /** Cancel the currently-running prompt on [baseUrl]. */
+    suspend fun interruptRunning(baseUrl: String, promptId: String)
 
-    /** Remove a prompt that is queued but not yet running. */
-    suspend fun deleteQueued(promptId: String)
+    /** Remove a prompt that is queued but not yet running on [baseUrl]. */
+    suspend fun deleteQueued(baseUrl: String, promptId: String)
 }
 
 /**
- * Stream of WebSocket events for the active server.
+ * Stream of WebSocket events for [baseUrl].
  *
  * The Flow is cold (collecting it opens a fresh session); the
  * coordinator collects it exactly once per `run` invocation. Cancelling
  * the coordinator's coroutine cancels the WS subscription.
+ *
+ * `baseUrl` is parameterized so the WS subscription stays bound to the
+ * server the run was submitted on, regardless of subsequent active-server
+ * switches.
  *
  * IO exceptions thrown during collection are caught by the coordinator
  * and mapped to [RunState.Failed] with [RunError.Network] when no
@@ -70,7 +84,7 @@ interface CancelPort {
  * closed normally).
  */
 fun interface WsEventPort {
-    fun events(clientId: String): Flow<WsEvent>
+    fun events(baseUrl: String, clientId: String): Flow<WsEvent>
 }
 
 /**
