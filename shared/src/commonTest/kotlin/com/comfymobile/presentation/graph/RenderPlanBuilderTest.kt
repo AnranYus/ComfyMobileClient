@@ -413,6 +413,99 @@ class RenderPlanBuilderTest {
         assertEquals(0, plan.visibleSummaryRowCount())
     }
 
+    // ---------------------------------------------------------------- viewport virtualisation driven by gesture state
+    //
+    // Per @Lily PR #36 review (`4471956260`) blocker 2: the interactive
+    // surface must wire ViewportTransform.computeVisibleBounds(...)
+    // back into RenderPlanBuilder so pan/zoom changes the visible
+    // command set. These tests pin the deterministic invariant.
+
+    @Test fun pan_changes_visible_command_set_via_computeVisibleBounds_pipeline() {
+        // Three nodes laid out across x = 0, 1000, 2000.
+        // Canvas is 600x300 — at identity, only node "a" is visible.
+        // Pan world right by 1000 (panX = -1000) so node "b" enters view.
+        val graph = ParsedUiGraph(
+            nodes = listOf(
+                node("a", pos = Position(0f, 0f), size = Size(200f, 100f)),
+                node("b", pos = Position(1000f, 0f), size = Size(200f, 100f)),
+                node("c", pos = Position(2000f, 0f), size = Size(200f, 100f)),
+            ),
+            links = emptyList(),
+        )
+        val canvasW = 600f
+        val canvasH = 300f
+
+        // gesture A: identity → visible world rect = (0..600, 0..300)
+        // (plus 0 buffer below; default buffer 200 still keeps b out
+        // at x=1000), so only "a" should appear.
+        val gestureA = GestureState.Identity
+        val boundsA = ViewportTransform.computeVisibleBounds(
+            canvasWidthPx = canvasW, canvasHeightPx = canvasH,
+            gesture = gestureA, bufferWorldUnits = 0f,
+        )
+        val planA = buildPlan(graph, visibleBounds = boundsA)
+        val nodesA = planA.commands.filterIsInstance<DrawCommand.NodeBody>().map { it.nodeId }.toSet()
+
+        // gesture B: pan world left by 1000 (panX = -1000) at zoom 1
+        // → camera looks at world (1000..1600, 0..300), so node "b"
+        // (at x=1000..1200) is visible and node "a" is not.
+        val gestureB = GestureState(panX = -1000f, panY = 0f, zoomScale = 1f)
+        val boundsB = ViewportTransform.computeVisibleBounds(
+            canvasWidthPx = canvasW, canvasHeightPx = canvasH,
+            gesture = gestureB, bufferWorldUnits = 0f,
+        )
+        val planB = buildPlan(graph, visibleBounds = boundsB)
+        val nodesB = planB.commands.filterIsInstance<DrawCommand.NodeBody>().map { it.nodeId }.toSet()
+
+        assertEquals(setOf("a"), nodesA, "identity gesture should show node a only; got $nodesA")
+        assertEquals(setOf("b"), nodesB, "panned gesture should show node b only; got $nodesB")
+        assertTrue(
+            nodesA != nodesB,
+            "pan via ViewportTransform.computeVisibleBounds MUST change the visible command set; both = $nodesA",
+        )
+    }
+
+    @Test fun zoom_changes_visible_command_set_via_computeVisibleBounds_pipeline() {
+        // Wide layout: nodes at x = 0, 400, 800. Canvas 1000x300.
+        // At identity, all three are visible. At zoom 2x, world rect
+        // shrinks to 500x150 — node at x=800 falls off the right edge.
+        val graph = ParsedUiGraph(
+            nodes = listOf(
+                node("a", pos = Position(0f, 0f), size = Size(150f, 80f)),
+                node("b", pos = Position(400f, 0f), size = Size(150f, 80f)),
+                node("c", pos = Position(800f, 0f), size = Size(150f, 80f)),
+            ),
+            links = emptyList(),
+        )
+        val canvasW = 1000f
+        val canvasH = 300f
+
+        // identity: all three visible
+        val gestureA = GestureState.Identity
+        val boundsA = ViewportTransform.computeVisibleBounds(
+            canvasWidthPx = canvasW, canvasHeightPx = canvasH,
+            gesture = gestureA, bufferWorldUnits = 0f,
+        )
+        val planA = buildPlan(graph, visibleBounds = boundsA)
+        val nodesA = planA.commands.filterIsInstance<DrawCommand.NodeBody>().map { it.nodeId }.toSet()
+
+        // 2x zoom: world rect (0..500, 0..150) — node c (x=800) drops
+        val gestureB = GestureState(zoomScale = 2f)
+        val boundsB = ViewportTransform.computeVisibleBounds(
+            canvasWidthPx = canvasW, canvasHeightPx = canvasH,
+            gesture = gestureB, bufferWorldUnits = 0f,
+        )
+        val planB = buildPlan(graph, visibleBounds = boundsB)
+        val nodesB = planB.commands.filterIsInstance<DrawCommand.NodeBody>().map { it.nodeId }.toSet()
+
+        assertEquals(setOf("a", "b", "c"), nodesA, "identity zoom should show all three; got $nodesA")
+        assertEquals(setOf("a", "b"), nodesB, "2x zoom should drop node c off the right edge; got $nodesB")
+        assertTrue(
+            nodesA != nodesB,
+            "zoom via ViewportTransform.computeVisibleBounds MUST change the visible command set",
+        )
+    }
+
     // ---------------------------------------------------------------- §1.5 / §1.8 interactive LOD downgrade
 
     @Test fun interactive_lod_downgrade_off_keeps_bezier_edges() {

@@ -53,8 +53,13 @@ import kotlin.math.abs
  *
  * Three pointer input layers stacked:
  *  1. Pan / zoom — `awaitEachGesture` + `calculatePan` / `calculateZoom`
- *     dispatches `GestureIntent.Pan` / `Zoom` on motion, framed by
- *     `InteractionStart` / `InteractionEnd`.
+ *     dispatches `GestureIntent.Pan` AND/OR `GestureIntent.Zoom` on
+ *     motion (both can fire in the same frame for a pinch+drag —
+ *     `Zoom` carries focus-anchor info, `Pan` carries the leftover
+ *     centroid translation), framed by `InteractionStart` /
+ *     `InteractionEnd`. Per @Lily PR #36 review (`4471956260`) blocker
+ *     1: pan must NOT be gated by `!zoomed` or pinch+drag drops the
+ *     drag component.
  *  2. Tap / long-press — `detectTapGestures` hit-tests via [HitTester]
  *     and dispatches `Tap(hitNodeId)` / `LongPress(hitNodeId)`.
  *
@@ -64,15 +69,26 @@ import kotlin.math.abs
  *
  * Per @Ores T2.7 §1.5 / §1.8: edge LOD downgrade is wired by passing
  * `gestureState.isInteracting` into [RenderPlan.Builder.build] as
- * `interactiveLodDowngrade` — the caller does that build, this
- * composable only consumes the resulting [RenderPlan].
+ * `interactiveLodDowngrade` — the [buildPlan] lambda the caller
+ * supplies is responsible for that wiring (see preview).
+ *
+ * Per @Lily PR #36 review (`4471956260`) blocker 2: this composable
+ * owns the `canvasSize` measurement, derives the world-space
+ * `visibleBounds` via [ViewportTransform.computeVisibleBounds], and
+ * passes that into the caller's [buildPlan] lambda. Callers MUST
+ * forward `visibleBounds` to `RenderPlanBuilder.build(...,
+ * visibleBounds = ...)` so pan/zoom changes the visible-command set
+ * (viewport virtualisation). `visibleBounds` is `null` only on the
+ * first frame before `onSizeChanged` fires — callers should treat
+ * that case as "build the full plan" (the default
+ * `RenderPlanBuilder.visibleBounds = null` already does this).
  */
 @Composable
 fun InteractiveGraphCanvas(
-    plan: RenderPlan,
     layoutResult: LayoutResult,
     gestureState: GestureState,
     onIntent: (GestureIntent) -> Unit,
+    buildPlan: (visibleBounds: Rect?) -> RenderPlan,
     modifier: Modifier = Modifier,
     backgroundColor: Color = MaterialTheme.colorScheme.surface,
     overlay: @Composable BoxScope.() -> Unit = { defaultOverlay(onIntent) },
@@ -82,6 +98,16 @@ fun InteractiveGraphCanvas(
     val measurer = rememberTextMeasurer()
 
     var canvasSize by remember { mutableStateOf(IntSize.Zero) }
+
+    val visibleBounds: Rect? = remember(canvasSize, gestureState) {
+        if (canvasSize == IntSize.Zero) null
+        else ViewportTransform.computeVisibleBounds(
+            canvasWidthPx = canvasSize.width.toFloat(),
+            canvasHeightPx = canvasSize.height.toFloat(),
+            gesture = gestureState,
+        )
+    }
+    val plan: RenderPlan = buildPlan(visibleBounds)
 
     Box(
         modifier = modifier
@@ -106,12 +132,17 @@ fun InteractiveGraphCanvas(
                             val pan = event.calculatePan()
                             val moved = pointers.any { it.positionChanged() }
                             val zoomed = abs(zoom - 1f) > Z_DEAD_ZONE
+                            val panned = moved && pan != Offset.Zero
 
                             if (!interactionStarted && (moved || zoomed)) {
                                 onIntent(GestureIntent.InteractionStart)
                                 interactionStarted = true
                             }
 
+                            // Zoom first so its focus-anchor pan adjustment
+                            // happens before any leftover centroid translation
+                            // is layered on by Pan. Reducer composes pan via
+                            // delta-addition so the order is safe.
                             if (zoomed) {
                                 val focus = pointers.fold(Offset.Zero) { acc, p -> acc + p.position } /
                                     pointers.size.toFloat()
@@ -122,13 +153,15 @@ fun InteractiveGraphCanvas(
                                         focusScreenY = focus.y,
                                     )
                                 )
-                                pointers.forEach { it.consume() }
                             }
-                            if (moved && !zoomed) {
-                                if (pan != Offset.Zero) {
-                                    onIntent(GestureIntent.Pan(pan.x, pan.y))
-                                    pointers.forEach { it.consume() }
-                                }
+                            // Per @Lily PR #36 review (`4471956260`) blocker 1:
+                            // emit Pan regardless of zoom — pinch + drag must
+                            // not drop the centroid translation component.
+                            if (panned) {
+                                onIntent(GestureIntent.Pan(pan.x, pan.y))
+                            }
+                            if (zoomed || panned) {
+                                pointers.forEach { it.consume() }
                             }
                         } while (pointers.any { it.pressed })
                     } finally {

@@ -71,6 +71,55 @@ class GestureReducerTest {
         assertEquals(2f, after.zoomScale)
     }
 
+    // ---------------------------------------------------------------- combined pinch+drag (Lily PR #36 review `4471956260` blocker 1)
+
+    @Test fun zoom_followed_by_pan_in_same_frame_composes_correctly_for_pinch_plus_drag() {
+        // Regression for @Lily PR #36 review (`4471956260`) blocker 1:
+        // when a pinch+drag fires in one pointer-event frame, the
+        // Compose layer must emit BOTH a Zoom intent (focus-anchored)
+        // AND a Pan intent (leftover centroid translation). The
+        // reducer composes them via delta-addition.
+        //
+        // Starting state: identity. Frame: pinch with factor=2 at
+        // focus (200,100), centroid pan delta (40, 0).
+        // Expected: zoom rises to 2; focus-anchor pan = focus*(1/2 - 1)
+        // = (-100, -50); leftover screen pan (40, 0) at zoom 2 = world
+        // pan (20, 0). Final pan = (-100 + 20, -50 + 0) = (-80, -50).
+        var state = GestureState.Identity
+        state = GestureReducer.reduce(
+            state,
+            GestureIntent.Zoom(factor = 2f, focusScreenX = 200f, focusScreenY = 100f),
+        )
+        state = GestureReducer.reduce(
+            state,
+            GestureIntent.Pan(deltaScreenX = 40f, deltaScreenY = 0f),
+        )
+
+        assertEquals(2f, state.zoomScale, 0.001f)
+        assertEquals(-80f, state.panX, 0.001f, "combined pinch+drag pan-x must include both focus-anchor and centroid components")
+        assertEquals(-50f, state.panY, 0.001f, "combined pinch+drag pan-y must include both focus-anchor and centroid components")
+    }
+
+    @Test fun pan_after_zoom_is_not_silently_swallowed() {
+        // Tight regression specifically for the pre-fix bug: the
+        // pre-fix Compose layer dispatched Zoom OR Pan (mutually
+        // exclusive). This test pins that, given a Pan intent fired
+        // independent of whether a Zoom preceded it in the same frame,
+        // the state's pan field reflects the Pan delta — i.e. the
+        // reducer always honours the intent (Compose-side fix
+        // delivers the intents; reducer composes them).
+        val zoomed = GestureReducer.reduce(
+            GestureState.Identity,
+            GestureIntent.Zoom(factor = 2f, focusScreenX = 0f, focusScreenY = 0f),
+        )
+        // At zoom=2 with focus at origin, zoom-induced pan adjustment is 0.
+        assertEquals(0f, zoomed.panX, 0.001f)
+        val combined = GestureReducer.reduce(zoomed, GestureIntent.Pan(60f, 30f))
+        // Pan delta at zoom 2 = world (30, 15)
+        assertEquals(30f, combined.panX, 0.001f)
+        assertEquals(15f, combined.panY, 0.001f)
+    }
+
     // ---------------------------------------------------------------- Tap / LongPress
 
     @Test fun tap_with_hit_sets_selectedNodeId() {

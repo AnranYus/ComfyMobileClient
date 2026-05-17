@@ -43,8 +43,15 @@ private fun rememberGesture(initial: GestureState = GestureState.Identity): Pair
 private fun previewLayout(): LayoutResult =
     GraphLayout.layout(graph = previewGraphForGestures())
 
-@Composable
-private fun gestureAwarePlan(gesture: GestureState): RenderPlan =
+/**
+ * Plan-builder closure used by the previews. Mirrors the production
+ * contract: takes the composable-computed `visibleBounds` and forwards
+ * it to `RenderPlanBuilder.build` so pan/zoom virtualises the
+ * command list (per @Lily PR #36 review `4471956260` blocker 2).
+ */
+private fun gestureAwarePlanBuilder(
+    gesture: GestureState,
+): (Rect?) -> RenderPlan = { visibleBounds ->
     RenderPlanBuilder.build(
         graph = previewGraphForGestures(),
         layoutResult = previewLayout(),
@@ -63,8 +70,10 @@ private fun gestureAwarePlan(gesture: GestureState): RenderPlan =
         resolveTitle = { node ->
             NodeTitleSpec(text = node.classType, italic = false)
         },
+        visibleBounds = visibleBounds,
         interactiveLodDowngrade = gesture.isInteracting,
     )
+}
 
 // ---------------------------------------------------------------- Identity
 
@@ -75,10 +84,10 @@ private fun InteractiveGraphCanvasIdentityPreview() {
     MaterialTheme(colorScheme = lightColorScheme()) {
         Surface(modifier = Modifier.fillMaxSize()) {
             InteractiveGraphCanvas(
-                plan = gestureAwarePlan(state),
                 layoutResult = previewLayout(),
                 gestureState = state,
                 onIntent = dispatch,
+                buildPlan = gestureAwarePlanBuilder(state),
             )
         }
     }
@@ -95,10 +104,10 @@ private fun InteractiveGraphCanvasPannedZoomedPreview() {
     MaterialTheme(colorScheme = lightColorScheme()) {
         Surface(modifier = Modifier.fillMaxSize()) {
             InteractiveGraphCanvas(
-                plan = gestureAwarePlan(state),
                 layoutResult = previewLayout(),
                 gestureState = state,
                 onIntent = dispatch,
+                buildPlan = gestureAwarePlanBuilder(state),
             )
         }
     }
@@ -115,10 +124,10 @@ private fun InteractiveGraphCanvasSelectedPreview() {
     MaterialTheme(colorScheme = lightColorScheme()) {
         Surface(modifier = Modifier.fillMaxSize()) {
             InteractiveGraphCanvas(
-                plan = gestureAwarePlan(state),
                 layoutResult = previewLayout(),
                 gestureState = state,
                 onIntent = dispatch,
+                buildPlan = gestureAwarePlanBuilder(state),
             )
         }
     }
@@ -135,10 +144,10 @@ private fun InteractiveGraphCanvasInteractingLodDowngradePreview() {
     MaterialTheme(colorScheme = lightColorScheme()) {
         Surface(modifier = Modifier.fillMaxSize()) {
             InteractiveGraphCanvas(
-                plan = gestureAwarePlan(state),
                 layoutResult = previewLayout(),
                 gestureState = state,
                 onIntent = dispatch,
+                buildPlan = gestureAwarePlanBuilder(state),
             )
         }
     }
