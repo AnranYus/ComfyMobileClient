@@ -105,11 +105,24 @@ class RunViewModelTest {
     private class RecordingCancel : CancelPort {
         val interruptCalls = mutableListOf<Pair<String, String>>()
         val deleteCalls = mutableListOf<Pair<String, String>>()
+        // Channels signal each call so tests can `await` arrival
+        // explicitly. Needed because VM.confirmCancel() dispatches the
+        // cancel via scope.launch — the call hasn't necessarily landed
+        // by the time the next test statement runs.
+        val interruptSignal: Channel<Pair<String, String>> =
+            Channel(Channel.UNLIMITED)
+        val deleteSignal: Channel<Pair<String, String>> =
+            Channel(Channel.UNLIMITED)
+
         override suspend fun interruptRunning(baseUrl: String, promptId: String) {
-            interruptCalls += baseUrl to promptId
+            val call = baseUrl to promptId
+            interruptCalls += call
+            interruptSignal.trySend(call)
         }
         override suspend fun deleteQueued(baseUrl: String, promptId: String) {
-            deleteCalls += baseUrl to promptId
+            val call = baseUrl to promptId
+            deleteCalls += call
+            deleteSignal.trySend(call)
         }
         val interruptPromptIds: List<String> get() = interruptCalls.map { it.second }
         val deletePromptIds: List<String> get() = deleteCalls.map { it.second }
@@ -156,14 +169,14 @@ class RunViewModelTest {
     // ----------------------------------------------------------------- gate 1
 
     @Test fun canSubmit_is_false_initially_without_prepared_workflow() = runTest {
-        val (vm, _) = vm(scope = this)
+        val (vm, _) = vm(scope = backgroundScope)
         // Wait for stateIn to publish initial value.
         val state = vm.uiState.first { true }
         assertFalse(state.canSubmit)
     }
 
     @Test fun canSubmit_becomes_true_after_prepare_with_active_server_present() = runTest {
-        val (vm, _) = vm(scope = this)
+        val (vm, _) = vm(scope = backgroundScope)
         vm.prepare(PreparedWorkflow(envelope = envelope(), label = "wf"))
         val state = vm.uiState.first { it.canSubmit }
         assertTrue(state.canSubmit)
@@ -172,7 +185,7 @@ class RunViewModelTest {
     @Test fun canSubmit_remains_false_without_active_server_even_with_prepared_workflow() = runTest {
         val (vm, _) = vm(
             activeServer = activeServerHolder(server = null),
-            scope = this,
+            scope = backgroundScope,
         )
         vm.prepare(PreparedWorkflow(envelope = envelope()))
         val state = vm.uiState.first { true }
@@ -184,7 +197,7 @@ class RunViewModelTest {
     @Test fun requestCancel_then_confirmCancel_routes_through_coordinator_for_Queued() = runTest {
         val cancel = RecordingCancel()
         val ws = ChannelWs()
-        val (vm, coordinator) = vm(cancel = cancel, ws = ws, scope = this)
+        val (vm, coordinator) = vm(cancel = cancel, ws = ws, scope = backgroundScope)
         vm.prepare(PreparedWorkflow(envelope = envelope()))
 
         val terminalDeferred = async(Dispatchers.Unconfined) { coordinator.run(
@@ -216,7 +229,7 @@ class RunViewModelTest {
     @Test fun requestCancel_then_confirmCancel_routes_through_coordinator_for_Running() = runTest {
         val cancel = RecordingCancel()
         val ws = ChannelWs()
-        val (vm, coordinator) = vm(cancel = cancel, ws = ws, scope = this)
+        val (vm, coordinator) = vm(cancel = cancel, ws = ws, scope = backgroundScope)
         vm.prepare(PreparedWorkflow(envelope = envelope()))
 
         val terminalDeferred = async(Dispatchers.Unconfined) { coordinator.run(
@@ -239,6 +252,13 @@ class RunViewModelTest {
         vm.uiState.first { it.cancelConfirmOpen }
         vm.confirmCancel()
 
+        // Block until the cancel API actually lands. confirmCancel
+        // dispatches via scope.launch; without this sync the next
+        // ws.send could be processed first and drive the reducer to
+        // Cancelled before requestCancel observes Running, leaving
+        // interruptCalls empty (race).
+        withTimeout(1_000) { cancel.interruptSignal.receive() }
+
         // Running cancel waits for server event.
         ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1", nodeId = "1"))
         val terminal = withTimeout(1_000) { terminalDeferred.await() }
@@ -249,7 +269,7 @@ class RunViewModelTest {
     }
 
     @Test fun requestCancel_in_Idle_does_not_open_confirm() = runTest {
-        val (vm, _) = vm(scope = this)
+        val (vm, _) = vm(scope = backgroundScope)
         vm.prepare(PreparedWorkflow(envelope = envelope()))
         vm.uiState.first { it.canSubmit }
 
@@ -263,7 +283,7 @@ class RunViewModelTest {
 
     @Test fun dismissTerminal_hides_the_terminal_sheet_even_though_RunState_is_terminal() = runTest {
         val ws = ChannelWs()
-        val (vm, coordinator) = vm(ws = ws, scope = this)
+        val (vm, coordinator) = vm(ws = ws, scope = backgroundScope)
         vm.prepare(PreparedWorkflow(envelope = envelope()))
 
         val terminalDeferred = async(Dispatchers.Unconfined) { coordinator.run(
@@ -306,7 +326,7 @@ class RunViewModelTest {
      */
     @Test fun prepare_after_dismiss_does_NOT_resurrect_the_dismissed_terminal() = runTest {
         val ws = ChannelWs()
-        val (vm, coordinator) = vm(ws = ws, scope = this)
+        val (vm, coordinator) = vm(ws = ws, scope = backgroundScope)
         vm.prepare(PreparedWorkflow(envelope = envelope()))
 
         val deferred = async(Dispatchers.Unconfined) { coordinator.run(
@@ -346,7 +366,7 @@ class RunViewModelTest {
     // ----------------------------------------------------------------- Lily blocker 4: API-only envelope CTA gate
 
     @Test fun canSubmit_is_false_when_only_API_format_envelope_is_prepared() = runTest {
-        val (vm, _) = vm(scope = this)
+        val (vm, _) = vm(scope = backgroundScope)
         val apiOnly = WorkflowEnvelope(
             original = buildJsonObject {
                 put("1", buildJsonObject {
@@ -373,7 +393,7 @@ class RunViewModelTest {
     @Test fun dismissCancel_closes_confirm_without_triggering_coordinator() = runTest {
         val cancel = RecordingCancel()
         val ws = ChannelWs()
-        val (vm, coordinator) = vm(cancel = cancel, ws = ws, scope = this)
+        val (vm, coordinator) = vm(cancel = cancel, ws = ws, scope = backgroundScope)
         vm.prepare(PreparedWorkflow(envelope = envelope()))
 
         val terminalDeferred = async(Dispatchers.Unconfined) { coordinator.run(
