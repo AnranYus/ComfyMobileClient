@@ -276,4 +276,3 @@ class RunReconciler(
 fun interface HistoryProbePort {
     suspend fun getHistoryEntry(baseUrl: String, promptId: String): HistoryEntryDto?
 }
-
