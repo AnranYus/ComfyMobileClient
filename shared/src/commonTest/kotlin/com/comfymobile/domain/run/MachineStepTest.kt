@@ -166,8 +166,13 @@ class MachineStepTest {
     }
 
     @Test fun executed_does_not_overwrite_firstOutput_once_set() {
+        // Seed both firstOutput AND outputs to model the post-first-Executed
+        // state correctly — firstOutput would never be set without the
+        // corresponding entry having been appended to outputs.
+        val firstImage = JobOutputRef("first.png", "", "output")
         val mid = initial.copy(
-            firstOutput = JobOutputRef("first.png", "", "output"),
+            firstOutput = firstImage,
+            outputs = listOf(firstImage),
         )
         val next = MachineStep.step(
             mid,
@@ -186,9 +191,11 @@ class MachineStepTest {
             ),
         )!!
         // firstOutput stays anchored to "first.png" even after a later node also emits images.
-        assertEquals(JobOutputRef("first.png", "", "output"), next.firstOutput)
+        assertEquals(firstImage, next.firstOutput)
         // but the new image is still appended to outputs.
         assertEquals(2, next.outputs.size)
+        assertEquals(firstImage, next.outputs[0])
+        assertEquals(JobOutputRef("second.png", "", "output"), next.outputs[1])
     }
 
     @Test fun executed_with_non_image_output_is_recorded_but_no_outputs_added() {

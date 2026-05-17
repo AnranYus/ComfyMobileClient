@@ -9,16 +9,14 @@ import com.comfymobile.domain.job.JobStatus
 import com.comfymobile.domain.workflow.WorkflowConverter
 import com.comfymobile.domain.workflow.WorkflowGraph
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.merge
-import kotlinx.coroutines.flow.transformWhile
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -263,23 +261,30 @@ class RunCoordinator(
      * Subscribe to WS events for [promptId] and drive the state
      * machine. Returns the terminal [RunState].
      *
-     * **Termination contract** (per @Lily PR #30 review msg `49b81084`):
-     * The collection loop MUST exit once a terminal state is reached.
-     * In production `ws.events(clientId)` is a long-lived `/ws`
-     * connection that is by design never closed by the server, so the
-     * coordinator cannot rely on Flow completion for terminal detection.
-     * Instead, we drive collection through [transformWhile] keyed on
-     * the local `snapshot.terminal` so the flow completes deterministically
-     * after the reducer commits a terminal value — releasing [runMutex]
-     * and allowing the next run.
+     * **Termination contract** (per @Lily PR #30 review msgs `49b81084` /
+     * `e1d26e71`):
      *
-     * Two input sources feed the same reducer:
-     *  - [WsEventPort] frames (server-driven transitions)
-     *  - [forceTerminalSignal] (synthesised by [requestCancel] for
-     *    queued-cancel, where the server emits no follow-up event)
+     * The reducer loop MUST exit deterministically across THREE distinct
+     * conditions, each independent of the long-lived WebSocket socket:
      *
-     * They merge into a single [MachineInput] stream so reducer logic
-     * stays in one place.
+     *   1. Server-driven terminal — `execution_success` / `execution_error`
+     *      / `execution_interrupted` arrives; reducer commits `Terminal`;
+     *      loop breaks.
+     *   2. Local force-terminal — [requestCancel] for the Queued state
+     *      emits a synthesised `Terminal.Cancelled` because ComfyUI does
+     *      NOT send `execution_interrupted` for queue-deleted prompts.
+     *   3. WS stream completed without terminal — server closed the
+     *      socket politely or it dropped; we surface this as
+     *      [RunError.Network] so the UI doesn't hang.
+     *
+     * Implementation uses an explicit `Channel<MachineInput>` fan-in
+     * instead of `Flow.merge`. The merge approach is unsafe here because
+     * [forceTerminalSignal] is a [MutableSharedFlow] that never completes,
+     * which would prevent merge from completing when the WS flow ends —
+     * defeating termination condition (3). With a Channel, the WS
+     * collector explicitly sends [MachineInput.WsCompleted] /
+     * [MachineInput.WsError] when its Flow ends, and the reducer breaks
+     * cleanly.
      *
      * Wire-event mapping (T0.1 §2 + T0.4 §3.2):
      *  - `execution_start(promptId)`       → transition Queued → Running (empty bookkeeping)
@@ -300,44 +305,77 @@ class RunCoordinator(
         clientId: String,
         serverId: String,
     ): RunState = coroutineScope {
-        var snapshot = MachineSnapshot(promptId = promptId)
+        val inputs = Channel<MachineInput>(capacity = Channel.UNLIMITED)
 
-        val wsInputs: Flow<MachineInput> =
-            ws.events(clientId).map { MachineInput.WsFrame(it) }
-        val forceInputs: Flow<MachineInput> =
+        val wsJob = launch {
+            try {
+                ws.events(clientId).collect { event ->
+                    inputs.trySend(MachineInput.WsFrame(event))
+                }
+                // Flow completed without an error — server closed the socket.
+                inputs.trySend(MachineInput.WsCompleted)
+            } catch (t: CancellationException) {
+                throw t
+            } catch (t: Throwable) {
+                inputs.trySend(MachineInput.WsError(t))
+            }
+        }
+
+        val forceJob = launch {
             forceTerminalSignal
                 .filter { it.promptId == promptId }
-                .map { MachineInput.Force(it.terminal) }
+                .collect { signal ->
+                    inputs.trySend(MachineInput.Force(signal.terminal))
+                }
+        }
 
-        merge(wsInputs, forceInputs)
-            .transformWhile { input ->
-                emit(input)
-                // After downstream processed this input, exit the flow
-                // as soon as a terminal has been committed. This is the
-                // only mechanism that breaks us out of the otherwise-
-                // unbounded /ws stream.
-                snapshot.terminal == null
-            }
-            .collect { input ->
-                val next = when (input) {
-                    is MachineInput.WsFrame -> MachineStep.step(snapshot, input.event)
-                    is MachineInput.Force -> snapshot.copy(terminal = input.terminal)
-                } ?: return@collect
-                snapshot = next
+        var snapshot = MachineSnapshot(promptId = promptId)
+        var wsError: Throwable? = null
+
+        try {
+            for (input in inputs) {
+                when (input) {
+                    is MachineInput.WsFrame -> {
+                        val next = MachineStep.step(snapshot, input.event) ?: continue
+                        snapshot = next
+                    }
+                    is MachineInput.Force -> {
+                        snapshot = snapshot.copy(terminal = input.terminal)
+                    }
+                    is MachineInput.WsCompleted -> {
+                        // Server closed /ws politely without a terminal event.
+                        // Fall through to the post-loop "no terminal" branch
+                        // which finalizes as Failed(Network).
+                        if (snapshot.terminal == null) break
+                        continue
+                    }
+                    is MachineInput.WsError -> {
+                        wsError = input.cause
+                        if (snapshot.terminal == null) break
+                        continue
+                    }
+                }
                 if (snapshot.terminal != null) {
                     finalizeFromSnapshot(snapshot)
+                    break
                 } else {
                     applySnapshot(snapshot)
                 }
             }
+        } finally {
+            // Cancel both fan-in jobs before returning so they don't
+            // keep collecting after we've decided on a terminal.
+            wsJob.cancel()
+            forceJob.cancel()
+            inputs.close()
+        }
 
-        // If the upstream completed without a terminal (server closed
-        // the socket politely without execution_success), treat that as
-        // a network failure so the UI doesn't get stuck.
         if (snapshot.terminal == null) {
             return@coroutineScope finalizeFailed(
                 promptId = promptId,
-                error = RunError.Network(IllegalStateException("WS closed before terminal event")),
+                error = RunError.Network(
+                    wsError ?: IllegalStateException("WS closed before terminal event")
+                ),
                 persistJob = true,
             )
         }
@@ -461,14 +499,20 @@ internal sealed interface Terminal {
 /**
  * Unified input type for the reducer loop in [RunCoordinator.driveWsLifecycle].
  *
- * Two streams feed into the same reducer: real WS frames and synthesised
- * "force terminal" signals from [RunCoordinator.requestCancel]. Combining
- * them as one sealed input means the reducer has a single decision site
- * for "advance the snapshot" → "check terminal" → "exit the loop".
+ * Four sources feed into the same reducer: real WS frames, synthesised
+ * "force terminal" signals from [RunCoordinator.requestCancel], and two
+ * structural events for the WS Flow's completion (clean close vs error).
+ *
+ * Encoding the WS lifecycle as explicit inputs keeps the reducer
+ * decision site in one `for (input in inputs)` loop and lets us break
+ * deterministically across all three termination conditions documented
+ * on [RunCoordinator.driveWsLifecycle].
  */
 internal sealed interface MachineInput {
     data class WsFrame(val event: WsEvent) : MachineInput
     data class Force(val terminal: Terminal) : MachineInput
+    data object WsCompleted : MachineInput
+    data class WsError(val cause: Throwable) : MachineInput
 }
 
 /**

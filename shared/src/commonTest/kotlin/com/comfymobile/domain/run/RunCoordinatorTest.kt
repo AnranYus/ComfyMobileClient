@@ -76,14 +76,24 @@ class RunCoordinatorTest {
     private class RecordingPrompt(
         private val response: PromptResponseDto = PromptResponseDto(prompt_id = "p-1", number = 0),
         private val throwOnSubmit: Throwable? = null,
+        /**
+         * When non-null, return the i'th element on the i'th call (clamped
+         * to last). Lets tests assert that consecutive runs got distinct
+         * prompt ids — without this, a buggy implementation reusing the
+         * first run's prompt id would slip through.
+         */
+        private val sequencedResponses: List<PromptResponseDto>? = null,
     ) : PromptSubmissionPort {
         var lastRequest: PromptRequestDto? = null
+        val requests: MutableList<PromptRequestDto> = mutableListOf()
         var calls: Int = 0
         override suspend fun submit(request: PromptRequestDto): PromptResponseDto {
             calls += 1
             lastRequest = request
+            requests += request
             throwOnSubmit?.let { throw it }
-            return response
+            return sequencedResponses?.getOrElse(calls - 1) { sequencedResponses.last() }
+                ?: response
         }
     }
 
@@ -425,38 +435,52 @@ class RunCoordinatorTest {
     }
 
     /**
-     * @Lily PR #30 regression (msg `49b81084`): after the run loop reaches
-     * a terminal via a WS event (without ws.close), the run mutex MUST be
-     * released so a subsequent run() call can proceed normally. Prior to
-     * the fix this hung because the WS Flow never completed.
+     * @Lily PR #30 regression (msgs `49b81084` / `e1d26e71`): after the
+     * run loop reaches a terminal via a WS event (without ws.close), the
+     * run mutex MUST be released so a subsequent run() call can proceed
+     * normally. Prior to the fix this hung because the WS Flow never
+     * completed.
+     *
+     * Sequenced prompt ids verify that the second run actually went
+     * through `POST /prompt` and is keyed on `p-2`, not the leftover
+     * `p-1` from the first run.
      */
     @Test fun run_after_terminal_can_proceed_releasing_mutex() = runTest {
-        val prompt = RecordingPrompt(response = PromptResponseDto(prompt_id = "p-1", number = 0))
+        val prompt = RecordingPrompt(
+            sequencedResponses = listOf(
+                PromptResponseDto(prompt_id = "p-1", number = 0),
+                PromptResponseDto(prompt_id = "p-2", number = 1),
+            ),
+        )
         val ws = ChannelWs()
         val (c, _) = coord(prompt = prompt, ws = ws)
 
-        // First run reaches a terminal WITHOUT ws.close().
+        // First run: terminal via WS event, no ws.close().
         val first = async(Dispatchers.Unconfined) { c.run(submission()) }
-        c.state.first { it is RunState.Queued }
+        c.state.first { it is RunState.Queued && it.promptId == "p-1" }
         ws.send(WsEvent.ExecutionStart(promptId = "p-1"))
         ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1"))
         withTimeout(1_000) { first.await() }
-        assertIs<RunState.Cancelled>(c.state.value)
+        val firstTerminal = assertIs<RunState.Cancelled>(c.state.value)
+        assertEquals("p-1", firstTerminal.promptId)
 
-        // The mutex MUST be released — the second run must transition out
-        // of the terminal state and reach Queued without deadlocking on
-        // the prior run's leftover collection.
+        // The mutex MUST be released — second run must submit and reach
+        // Queued("p-2") without deadlocking on the prior collection.
         val second = async(Dispatchers.Unconfined) {
             c.run(submission().copy(clientId = "client-2"))
         }
         withTimeout(1_000) {
-            c.state.first { it is RunState.Queued }
+            c.state.first { it is RunState.Queued && it.promptId == "p-2" }
         }
         assertEquals(2, prompt.calls, "second submit must have fired")
+        // Second run's actual prompt id is p-2, NOT the leftover p-1.
+        assertEquals("p-2", (c.state.value as RunState.Queued).promptId)
 
-        // Drain.
-        ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1"))
+        // Drain the second run with its own prompt id.
+        ws.send(WsEvent.ExecutionInterrupted(promptId = "p-2"))
         withTimeout(1_000) { second.await() }
+        val secondTerminal = assertIs<RunState.Cancelled>(c.state.value)
+        assertEquals("p-2", secondTerminal.promptId)
     }
 
     // ----------------------------------------------------------------- request shape
