@@ -27,6 +27,9 @@ interface JobRepository {
     /** Update the first output ref used by history thumbnails. */
     suspend fun updateFirstOutput(promptId: String, firstOutput: JobOutputRef?)
 
+    /** Update the user-controlled favorite flag for a history row. */
+    suspend fun updateFavorite(promptId: String, isFavorite: Boolean)
+
     /** Single-row lookup by primary key. */
     suspend fun getByPromptId(promptId: String): Job?
 

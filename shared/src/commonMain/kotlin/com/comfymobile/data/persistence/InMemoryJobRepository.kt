@@ -64,6 +64,14 @@ class InMemoryJobRepository : JobRepository {
         }
     }
 
+    override suspend fun updateFavorite(promptId: String, isFavorite: Boolean) {
+        mutex.withLock {
+            val current = state.value
+            val existing = current[promptId] ?: return
+            state.value = current + (promptId to existing.copy(isFavorite = isFavorite))
+        }
+    }
+
     override suspend fun getByPromptId(promptId: String): Job? = state.value[promptId]
 
     override suspend fun listByServer(serverId: String, limit: Int, offset: Int): List<Job> =

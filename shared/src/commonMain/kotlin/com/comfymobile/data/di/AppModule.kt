@@ -33,6 +33,8 @@ import com.comfymobile.domain.workflow.WorkflowRepository
 import com.comfymobile.presentation.history.ComfyHistoryThumbnailMapper
 import com.comfymobile.presentation.history.HistoryThumbnailMapper
 import com.comfymobile.presentation.history.HistoryViewModel
+import com.comfymobile.presentation.gallery.DisabledOutputGalleryActionGateway
+import com.comfymobile.presentation.gallery.OutputGalleryActionGateway
 import com.comfymobile.presentation.gallery.OutputGalleryViewModel
 import com.comfymobile.presentation.parameditor.ActiveServerParamOptionProvider
 import com.comfymobile.presentation.parameditor.ParamEditorViewModel
@@ -133,6 +135,8 @@ fun appModule(): Module = module {
             httpClient = get(qualifier = SHARED_HTTP_CLIENT),
         )
     }
+
+    single<OutputGalleryActionGateway> { DisabledOutputGalleryActionGateway }
 
     single<ServerHistoryStore> {
         val context = get<PlatformContext>()
@@ -293,12 +297,15 @@ fun appModule(): Module = module {
         )
     }
 
-    factory<OutputGalleryViewModel> {
+    factory<OutputGalleryViewModel> { (vmScope: CoroutineScope) ->
         val activeServerHolder = get<ActiveServerHolder>()
         OutputGalleryViewModel(
             imageMapper = ComfyImageMapper(
                 activeBaseUrlProvider = { activeServerHolder.current.value?.baseUrl },
             ),
+            jobRepository = get(),
+            actionGateway = get(),
+            scope = vmScope,
         )
     }
 }
