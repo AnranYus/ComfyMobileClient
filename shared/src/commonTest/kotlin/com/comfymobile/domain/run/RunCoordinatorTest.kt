@@ -167,7 +167,9 @@ class RunCoordinatorTest {
         ))
         ws.send(WsEvent.Executing(promptId = "p-1", node = null))
         ws.send(WsEvent.ExecutionSuccess(promptId = "p-1"))
-        ws.close()
+        // NOTE: deliberately NO ws.close() — production /ws never closes.
+        // The reducer must terminate on the ExecutionSuccess terminal alone.
+        // (@Lily PR #30 review msg `49b81084` regression coverage.)
 
         val terminal = withTimeout(1_000) { terminalDeferred.await() }
         val succeeded = assertIs<RunState.Succeeded>(terminal)
@@ -240,7 +242,7 @@ class RunCoordinatorTest {
             exceptionMessage = "boom",
             exceptionType = "RuntimeError",
         ))
-        ws.close()
+        // No ws.close() — terminal event alone must release the loop.
 
         val terminal = withTimeout(1_000) { terminalDeferred.await() }
         val failed = assertIs<RunState.Failed>(terminal)
@@ -262,7 +264,7 @@ class RunCoordinatorTest {
         ws.send(WsEvent.ExecutionStart(promptId = "p-1"))
         ws.send(WsEvent.Executing(promptId = "p-1", node = "n-3"))
         ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1", nodeId = "n-3"))
-        ws.close()
+        // No ws.close() — terminal event alone must release the loop.
 
         val terminal = withTimeout(1_000) { terminalDeferred.await() }
         val cancelled = assertIs<RunState.Cancelled>(terminal)
@@ -287,7 +289,7 @@ class RunCoordinatorTest {
             output = buildJsonObject { put("text", buildJsonArray { add(JsonPrimitive("not an image")) }) },
         ))
         ws.send(WsEvent.ExecutionSuccess(promptId = "p-1"))
-        ws.close()
+        // No ws.close() — ExecutionSuccess + NoOutputs alone must release the loop.
 
         val terminal = withTimeout(1_000) { terminalDeferred.await() }
         val failed = assertIs<RunState.Failed>(terminal)
@@ -297,12 +299,13 @@ class RunCoordinatorTest {
 
     // ----------------------------------------------------------------- cancel routing
 
-    @Test fun requestCancel_in_Queued_state_routes_to_DeleteQueued() = runTest {
+    @Test fun requestCancel_in_Queued_state_routes_to_DeleteQueued_and_terminates_locally() = runTest {
         val cancel = RecordingCancel()
         val ws = ChannelWs()
-        val (c, _) = coord(cancel = cancel, ws = ws)
+        val jobs = InMemoryJobRepository()
+        val (c, _) = coord(cancel = cancel, ws = ws, jobs = jobs)
 
-        async(Dispatchers.Unconfined) { c.run(submission()) }
+        val deferred = async(Dispatchers.Unconfined) { c.run(submission()) }
         c.state.first { it is RunState.Queued }
 
         val route = c.requestCancel()
@@ -311,17 +314,25 @@ class RunCoordinatorTest {
         assertEquals(listOf("p-1"), cancel.deleteCalls)
         assertEquals(emptyList<String>(), cancel.interruptCalls)
 
-        // Drain to clean shutdown.
-        ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1"))
-        ws.close()
+        // Per @Lily PR #30 review msg `49b81084`: ComfyUI does NOT emit
+        // execution_interrupted for queued prompts deleted from the queue
+        // (the prompt never ran, so there's nothing to interrupt). The
+        // run loop MUST still complete — without any WS event arriving
+        // and without ws.close() being called.
+        val terminal = withTimeout(1_000) { deferred.await() }
+        val cancelled = assertIs<RunState.Cancelled>(terminal)
+        assertEquals("p-1", cancelled.promptId)
+        assertNull(cancelled.fromNodeId)
+        assertEquals(JobStatus.INTERRUPTED, jobs.getByPromptId("p-1")!!.status)
     }
 
-    @Test fun requestCancel_in_Running_state_routes_to_InterruptRunning() = runTest {
+    @Test fun requestCancel_in_Running_state_routes_to_InterruptRunning_and_waits_for_server_event() = runTest {
         val cancel = RecordingCancel()
         val ws = ChannelWs()
-        val (c, _) = coord(cancel = cancel, ws = ws)
+        val jobs = InMemoryJobRepository()
+        val (c, _) = coord(cancel = cancel, ws = ws, jobs = jobs)
 
-        async(Dispatchers.Unconfined) { c.run(submission()) }
+        val deferred = async(Dispatchers.Unconfined) { c.run(submission()) }
         c.state.first { it is RunState.Queued }
         ws.send(WsEvent.ExecutionStart(promptId = "p-1"))
         ws.send(WsEvent.Executing(promptId = "p-1", node = "n-2"))
@@ -333,8 +344,13 @@ class RunCoordinatorTest {
         assertEquals(listOf("p-1"), cancel.interruptCalls)
         assertEquals(emptyList<String>(), cancel.deleteCalls)
 
-        ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1"))
-        ws.close()
+        // For Running cancel, ComfyUI DOES emit execution_interrupted via WS
+        // (the prompt was executing). Run loop waits for that event.
+        ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1", nodeId = "n-2"))
+        val terminal = withTimeout(1_000) { deferred.await() }
+        val cancelled = assertIs<RunState.Cancelled>(terminal)
+        assertEquals("n-2", cancelled.fromNodeId)
+        assertEquals(JobStatus.INTERRUPTED, jobs.getByPromptId("p-1")!!.status)
     }
 
     @Test fun requestCancel_in_Idle_state_is_noop() = runTest {
@@ -362,7 +378,6 @@ class RunCoordinatorTest {
             exceptionMessage = "fail",
             exceptionType = "Err",
         ))
-        ws.close()
         deferred.await()
 
         assertNull(c.requestCancel())
@@ -406,8 +421,42 @@ class RunCoordinatorTest {
         assertEquals(c.state.value, secondResult)
 
         ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1"))
-        ws.close()
         firstRun.await()
+    }
+
+    /**
+     * @Lily PR #30 regression (msg `49b81084`): after the run loop reaches
+     * a terminal via a WS event (without ws.close), the run mutex MUST be
+     * released so a subsequent run() call can proceed normally. Prior to
+     * the fix this hung because the WS Flow never completed.
+     */
+    @Test fun run_after_terminal_can_proceed_releasing_mutex() = runTest {
+        val prompt = RecordingPrompt(response = PromptResponseDto(prompt_id = "p-1", number = 0))
+        val ws = ChannelWs()
+        val (c, _) = coord(prompt = prompt, ws = ws)
+
+        // First run reaches a terminal WITHOUT ws.close().
+        val first = async(Dispatchers.Unconfined) { c.run(submission()) }
+        c.state.first { it is RunState.Queued }
+        ws.send(WsEvent.ExecutionStart(promptId = "p-1"))
+        ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1"))
+        withTimeout(1_000) { first.await() }
+        assertIs<RunState.Cancelled>(c.state.value)
+
+        // The mutex MUST be released — the second run must transition out
+        // of the terminal state and reach Queued without deadlocking on
+        // the prior run's leftover collection.
+        val second = async(Dispatchers.Unconfined) {
+            c.run(submission().copy(clientId = "client-2"))
+        }
+        withTimeout(1_000) {
+            c.state.first { it is RunState.Queued }
+        }
+        assertEquals(2, prompt.calls, "second submit must have fired")
+
+        // Drain.
+        ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1"))
+        withTimeout(1_000) { second.await() }
     }
 
     // ----------------------------------------------------------------- request shape
@@ -432,7 +481,6 @@ class RunCoordinatorTest {
         assertEquals(extraData, req.extra_data)
 
         ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1"))
-        ws.close()
         deferred.await()
     }
 
@@ -450,7 +498,34 @@ class RunCoordinatorTest {
         assertEquals("client-XYZ", ws.lastClientId)
 
         ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1"))
-        ws.close()
         deferred.await()
+    }
+
+    /**
+     * @Lily PR #30 regression coverage (msg `49b81084`): events arriving for
+     * a different prompt id (e.g. another client sharing the same WS) must
+     * be ignored, AND a terminal for the wrong prompt id must NOT release
+     * our loop. Combined with the local-finalize fix, this proves the
+     * terminal detection is keyed on snapshot.terminal (which only the
+     * matching prompt id can set), not on any incoming terminal event.
+     */
+    @Test fun terminal_event_for_other_prompt_does_not_release_loop() = runTest {
+        val ws = ChannelWs()
+        val (c, _) = coord(ws = ws)
+
+        val deferred = async(Dispatchers.Unconfined) { c.run(submission()) }
+        c.state.first { it is RunState.Queued }
+
+        // Foreign prompt's terminal — must be ignored.
+        ws.send(WsEvent.ExecutionSuccess(promptId = "p-other"))
+        ws.send(WsEvent.ExecutionInterrupted(promptId = "p-other"))
+
+        // Still queued for our prompt.
+        assertEquals("p-1", (c.state.value as? RunState.Queued)?.promptId)
+
+        // Now our own terminal — releases.
+        ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1"))
+        withTimeout(1_000) { deferred.await() }
+        assertIs<RunState.Cancelled>(c.state.value)
     }
 }

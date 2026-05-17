@@ -10,21 +10,21 @@ import com.comfymobile.domain.workflow.WorkflowConverter
 import com.comfymobile.domain.workflow.WorkflowGraph
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collect
-import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * Single-source-of-truth orchestrator for one workflow run.
@@ -90,6 +90,25 @@ class RunCoordinator(
     private val runMutex = Mutex()
 
     /**
+     * Signal channel used by [requestCancel] to deliver a synthesised
+     * `Terminal` into the [driveWsLifecycle] reducer for cases where
+     * the server is NOT going to emit a follow-up WS event.
+     *
+     * Concrete case (per @Lily T2.3 review on PR #30, msg `49b81084`):
+     * `POST /queue {"delete":[promptId]}` for a queued prompt that
+     * never started executing — ComfyUI removes it silently and does
+     * NOT emit `execution_interrupted`. Without this signal the run
+     * loop would block forever on a `/ws` connection that is by design
+     * long-lived and never closes.
+     *
+     * Signals are tagged with the originating `promptId` so a stale
+     * signal from a previous run is filtered out by the new run's
+     * collector instead of polluting it.
+     */
+    private val forceTerminalSignal =
+        MutableSharedFlow<ForceTerminalSignal>(extraBufferCapacity = 1)
+
+    /**
      * Runs a single workflow end-to-end.
      *
      * Suspends until the run reaches a terminal state ([RunState.Succeeded],
@@ -117,17 +136,22 @@ class RunCoordinator(
     /**
      * Request server-side cancellation of the in-flight run.
      *
-     *  - [RunState.Running] → calls [CancelPort.interruptRunning].
-     *  - [RunState.Queued]  → calls [CancelPort.deleteQueued].
+     *  - [RunState.Running] → calls [CancelPort.interruptRunning]. The
+     *    server is expected to emit `execution_interrupted` over WS,
+     *    which drives the state transition to [RunState.Cancelled] via
+     *    the normal reducer path. No local finalize.
+     *  - [RunState.Queued]  → calls [CancelPort.deleteQueued] AND
+     *    locally finalizes the run. ComfyUI does NOT emit
+     *    `execution_interrupted` for a prompt that was deleted from the
+     *    queue before executing (the prompt never ran, so there is
+     *    nothing to interrupt). The local finalize is delivered through
+     *    [forceTerminalSignal] so the reducer path is unchanged and the
+     *    WS collector terminates cleanly. (Per @Lily PR #30 review,
+     *    msg `49b81084`.)
      *  - Any other state    → no-op (idle / submitting / terminal).
      *
      * Returns the route taken so callers / tests can verify the
      * separation; null when the request was a no-op.
-     *
-     * Does NOT update [state] directly — that transition is driven by
-     * the inbound `execution_interrupted` event so the WS state machine
-     * stays the single source of truth. Callers wanting to short-cut
-     * to a local "cancelling" UI hint should layer that on top.
      */
     suspend fun requestCancel(): CancelRoute? {
         return when (val current = _state.value) {
@@ -137,6 +161,14 @@ class RunCoordinator(
             }
             is RunState.Queued -> {
                 cancel.deleteQueued(current.promptId)
+                // Locally finalize since the server will not emit an
+                // execution_interrupted event for queue-deletes.
+                forceTerminalSignal.tryEmit(
+                    ForceTerminalSignal(
+                        promptId = current.promptId,
+                        terminal = Terminal.Cancelled(fromNodeId = null),
+                    )
+                )
                 CancelRoute.DeleteQueued(current.promptId)
             }
             else -> null
@@ -231,6 +263,24 @@ class RunCoordinator(
      * Subscribe to WS events for [promptId] and drive the state
      * machine. Returns the terminal [RunState].
      *
+     * **Termination contract** (per @Lily PR #30 review msg `49b81084`):
+     * The collection loop MUST exit once a terminal state is reached.
+     * In production `ws.events(clientId)` is a long-lived `/ws`
+     * connection that is by design never closed by the server, so the
+     * coordinator cannot rely on Flow completion for terminal detection.
+     * Instead, we drive collection through [transformWhile] keyed on
+     * the local `snapshot.terminal` so the flow completes deterministically
+     * after the reducer commits a terminal value — releasing [runMutex]
+     * and allowing the next run.
+     *
+     * Two input sources feed the same reducer:
+     *  - [WsEventPort] frames (server-driven transitions)
+     *  - [forceTerminalSignal] (synthesised by [requestCancel] for
+     *    queued-cancel, where the server emits no follow-up event)
+     *
+     * They merge into a single [MachineInput] stream so reducer logic
+     * stays in one place.
+     *
      * Wire-event mapping (T0.1 §2 + T0.4 §3.2):
      *  - `execution_start(promptId)`       → transition Queued → Running (empty bookkeeping)
      *  - `execution_cached(promptId, nodes)` → add to cachedNodes
@@ -240,6 +290,7 @@ class RunCoordinator(
      *  - `execution_success(promptId)`     → terminal Succeeded
      *  - `execution_error(promptId, …)`    → terminal Failed(NodeException)
      *  - `execution_interrupted(promptId, …)` → terminal Cancelled
+     *  - synthesised ForceTerminal(Cancelled) → terminal Cancelled (queued-cancel)
      *
      * Events for *other* prompt ids are ignored — multiple clients can
      * share a server, and the WS multiplexes.
@@ -251,18 +302,38 @@ class RunCoordinator(
     ): RunState = coroutineScope {
         var snapshot = MachineSnapshot(promptId = promptId)
 
-        ws.events(clientId).onEach { event ->
-            val next = MachineStep.step(snapshot, event) ?: return@onEach
-            snapshot = next
-            applySnapshot(snapshot)
-            if (snapshot.terminal != null) {
-                finalizeFromSnapshot(snapshot)
-            }
-        }.collect()
+        val wsInputs: Flow<MachineInput> =
+            ws.events(clientId).map { MachineInput.WsFrame(it) }
+        val forceInputs: Flow<MachineInput> =
+            forceTerminalSignal
+                .filter { it.promptId == promptId }
+                .map { MachineInput.Force(it.terminal) }
 
-        // If the Flow completes before a terminal event (server closed
-        // the socket politely without sending execution_success), treat
-        // that as a network failure so the UI doesn't get stuck.
+        merge(wsInputs, forceInputs)
+            .transformWhile { input ->
+                emit(input)
+                // After downstream processed this input, exit the flow
+                // as soon as a terminal has been committed. This is the
+                // only mechanism that breaks us out of the otherwise-
+                // unbounded /ws stream.
+                snapshot.terminal == null
+            }
+            .collect { input ->
+                val next = when (input) {
+                    is MachineInput.WsFrame -> MachineStep.step(snapshot, input.event)
+                    is MachineInput.Force -> snapshot.copy(terminal = input.terminal)
+                } ?: return@collect
+                snapshot = next
+                if (snapshot.terminal != null) {
+                    finalizeFromSnapshot(snapshot)
+                } else {
+                    applySnapshot(snapshot)
+                }
+            }
+
+        // If the upstream completed without a terminal (server closed
+        // the socket politely without execution_success), treat that as
+        // a network failure so the UI doesn't get stuck.
         if (snapshot.terminal == null) {
             return@coroutineScope finalizeFailed(
                 promptId = promptId,
@@ -386,6 +457,29 @@ internal sealed interface Terminal {
     data class Failure(val error: RunError) : Terminal
     data class Cancelled(val fromNodeId: String?) : Terminal
 }
+
+/**
+ * Unified input type for the reducer loop in [RunCoordinator.driveWsLifecycle].
+ *
+ * Two streams feed into the same reducer: real WS frames and synthesised
+ * "force terminal" signals from [RunCoordinator.requestCancel]. Combining
+ * them as one sealed input means the reducer has a single decision site
+ * for "advance the snapshot" → "check terminal" → "exit the loop".
+ */
+internal sealed interface MachineInput {
+    data class WsFrame(val event: WsEvent) : MachineInput
+    data class Force(val terminal: Terminal) : MachineInput
+}
+
+/**
+ * Carrier for [RunCoordinator.forceTerminalSignal]. The `promptId` tag
+ * lets a new run filter out a stale signal left over from a previous
+ * run that completed before the signal was consumed.
+ */
+internal data class ForceTerminalSignal(
+    val promptId: String,
+    val terminal: Terminal,
+)
 
 /**
  * Pure state-machine reducer. Returns null when the event is for a
