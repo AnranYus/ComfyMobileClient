@@ -1,8 +1,6 @@
 package com.comfymobile.presentation.run
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -22,7 +20,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -55,6 +52,11 @@ import androidx.compose.ui.unit.sp
  *   - Cancel confirmation (destructive sheet)
  *   - Terminal Failed / Cancelled sheet
  *
+ * Localization: every user-facing string comes from [RunCopy] +
+ * `state.language`. Connection-banner texts re-use [com.comfymobile.presentation.connection.ConnectionCopy]
+ * via [RunCopy] aliases so a copy update lands in one place
+ * (per @Ores PR #31 review msg `10846076`).
+ *
  * Per @Lily T2.3 second-segment gate 4 (msg `3e9e7269`): the Cancel
  * confirmation calls [RunIntents.confirmCancel] which delegates to
  * `RunCoordinator.requestCancel()` — this surface does NOT touch
@@ -67,7 +69,7 @@ fun RunScreen(
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier.fillMaxWidth()) {
-        BranchBanner(state.branchBanner)
+        BranchBanner(state.branchBanner, state.language)
         TopStatusRow(state, onCancelClick = intents.requestCancel)
         Spacer(Modifier.height(8.dp))
         ProgressDetailCard(state)
@@ -78,25 +80,32 @@ fun RunScreen(
     if (state.cancelConfirmOpen) {
         AlertDialog(
             onDismissRequest = intents.dismissCancel,
-            title = { Text("确定取消？", fontWeight = FontWeight.SemiBold) },
-            text = { Text("已生成的部分将丢失。") },
+            title = {
+                Text(
+                    RunCopy.cancelConfirmTitle.resolve(state.language),
+                    fontWeight = FontWeight.SemiBold,
+                )
+            },
+            text = { Text(RunCopy.cancelConfirmBody.resolve(state.language)) },
             confirmButton = {
                 TextButton(
                     onClick = intents.confirmCancel,
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = MaterialTheme.colorScheme.error,
                     ),
-                ) { Text("取消生成") }
+                ) { Text(RunCopy.cancelConfirmConfirm.resolve(state.language)) }
             },
             dismissButton = {
-                TextButton(onClick = intents.dismissCancel) { Text("继续运行") }
+                TextButton(onClick = intents.dismissCancel) {
+                    Text(RunCopy.cancelConfirmDismiss.resolve(state.language))
+                }
             },
         )
     }
 
     when (val terminal = state.terminal) {
-        is RunUiState.TerminalView.Failure -> TerminalFailureSheet(terminal, intents)
-        is RunUiState.TerminalView.Cancelled -> TerminalCancelledSheet(terminal, intents)
+        is RunUiState.TerminalView.Failure -> TerminalFailureSheet(terminal, state, intents)
+        is RunUiState.TerminalView.Cancelled -> TerminalCancelledSheet(terminal, state, intents)
         null -> Unit
     }
 }
@@ -116,15 +125,27 @@ data class RunIntents(
 // ----------------------------------------------------------------- banner row
 
 @Composable
-private fun BranchBanner(banner: RunUiState.BranchBanner) {
+private fun BranchBanner(
+    banner: RunUiState.BranchBanner,
+    language: com.comfymobile.presentation.connection.ConnectionLanguage,
+) {
     val (text, color, contentColor) = when (banner) {
         is RunUiState.BranchBanner.None -> return
-        is RunUiState.BranchBanner.Reconnecting ->
-            Triple("网络小波动，正在重连…", MaterialTheme.colorScheme.surfaceVariant, MaterialTheme.colorScheme.onSurfaceVariant)
-        is RunUiState.BranchBanner.BackgroundResuming ->
-            Triple("欢迎回来，正在检查你的生成…", MaterialTheme.colorScheme.tertiaryContainer, MaterialTheme.colorScheme.onTertiaryContainer)
-        is RunUiState.BranchBanner.Offline ->
-            Triple("已离线，请检查 Wi-Fi 后重试", MaterialTheme.colorScheme.errorContainer, MaterialTheme.colorScheme.onErrorContainer)
+        is RunUiState.BranchBanner.Reconnecting -> Triple(
+            RunCopy.bannerLanFlake.resolve(language),
+            MaterialTheme.colorScheme.surfaceVariant,
+            MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        is RunUiState.BranchBanner.BackgroundResuming -> Triple(
+            RunCopy.bannerBackgroundResumed.resolve(language),
+            MaterialTheme.colorScheme.tertiaryContainer,
+            MaterialTheme.colorScheme.onTertiaryContainer,
+        )
+        is RunUiState.BranchBanner.Offline -> Triple(
+            RunCopy.bannerOffline.resolve(language),
+            MaterialTheme.colorScheme.errorContainer,
+            MaterialTheme.colorScheme.onErrorContainer,
+        )
     }
     Surface(color = color, contentColor = contentColor, modifier = Modifier.fillMaxWidth()) {
         Text(
@@ -149,11 +170,11 @@ private fun TopStatusRow(state: RunUiState, onCancelClick: () -> Unit) {
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = phaseLabel(state.phase),
+                    text = phaseLabel(state),
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 15.sp,
                 )
-                val sub = phaseSubLabel(state.phase)
+                val sub = phaseSubLabel(state)
                 if (sub != null) {
                     Spacer(Modifier.height(2.dp))
                     Text(
@@ -169,31 +190,38 @@ private fun TopStatusRow(state: RunUiState, onCancelClick: () -> Unit) {
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = MaterialTheme.colorScheme.error,
                     ),
-                ) { Text("取消") }
+                ) { Text(RunCopy.cancel.resolve(state.language)) }
             }
         }
     }
 }
 
-private fun phaseLabel(phase: RunUiState.Phase): String = when (phase) {
-    is RunUiState.Phase.Idle -> phase.workflowTitle ?: "尚未运行"
-    is RunUiState.Phase.Submitting -> "提交中…"
-    is RunUiState.Phase.Queued -> "排队中"
-    is RunUiState.Phase.Running -> "运行中"
-    is RunUiState.Phase.Succeeded -> "已完成"
-    is RunUiState.Phase.Failed -> "生成失败"
-    is RunUiState.Phase.Cancelled -> "已取消"
+private fun phaseLabel(state: RunUiState): String {
+    val lang = state.language
+    return when (val phase = state.phase) {
+        is RunUiState.Phase.Idle -> phase.workflowTitle ?: RunCopy.phaseIdle.resolve(lang)
+        is RunUiState.Phase.Submitting -> RunCopy.phaseSubmitting.resolve(lang)
+        is RunUiState.Phase.Queued -> RunCopy.phaseQueued.resolve(lang)
+        is RunUiState.Phase.Running -> RunCopy.phaseRunning.resolve(lang)
+        is RunUiState.Phase.Succeeded -> RunCopy.phaseSucceeded.resolve(lang)
+        is RunUiState.Phase.Failed -> RunCopy.phaseFailed.resolve(lang)
+        is RunUiState.Phase.Cancelled -> RunCopy.phaseCancelled.resolve(lang)
+    }
 }
 
-private fun phaseSubLabel(phase: RunUiState.Phase): String? = when (phase) {
-    is RunUiState.Phase.Idle -> null
-    is RunUiState.Phase.Submitting -> null
-    is RunUiState.Phase.Queued -> "队列位置 #${phase.queuePosition}"
-    is RunUiState.Phase.Running ->
-        phase.currentNodeDisplayName?.let { "当前节点：$it" } ?: phase.currentNodeId?.let { "当前节点 #$it" }
-    is RunUiState.Phase.Succeeded -> "${phase.outputs.size} 张图已生成"
-    is RunUiState.Phase.Failed -> null
-    is RunUiState.Phase.Cancelled -> null
+private fun phaseSubLabel(state: RunUiState): String? {
+    val lang = state.language
+    return when (val phase = state.phase) {
+        is RunUiState.Phase.Idle -> null
+        is RunUiState.Phase.Submitting -> null
+        is RunUiState.Phase.Queued -> RunCopy.queuePositionLabel(phase.queuePosition, lang)
+        is RunUiState.Phase.Running ->
+            phase.currentNodeDisplayName?.let { RunCopy.currentNodeLabel(it, lang) }
+                ?: phase.currentNodeId?.let { RunCopy.currentNodeIdLabel(it, lang) }
+        is RunUiState.Phase.Succeeded -> RunCopy.outputCountLabel(phase.outputs.size, lang)
+        is RunUiState.Phase.Failed -> null
+        is RunUiState.Phase.Cancelled -> null
+    }
 }
 
 // ----------------------------------------------------------------- progress detail card
@@ -210,7 +238,9 @@ private fun ProgressDetailCard(state: RunUiState) {
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                running.currentNodeDisplayName ?: running.currentNodeId ?: "处理中",
+                running.currentNodeDisplayName
+                    ?: running.currentNodeId
+                    ?: RunCopy.processing.resolve(state.language),
                 fontWeight = FontWeight.Medium,
                 fontSize = 14.sp,
             )
@@ -231,7 +261,7 @@ private fun ProgressDetailCard(state: RunUiState) {
             if (state.lastOutputThumbnail != null) {
                 Spacer(Modifier.height(8.dp))
                 Text(
-                    "最近产出：${state.lastOutputThumbnail.filename}",
+                    RunCopy.lastOutputLine(state.lastOutputThumbnail.filename, state.language),
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -256,12 +286,15 @@ private fun BottomBar(state: RunUiState, intents: RunIntents) {
             .padding(horizontal = 16.dp, vertical = 8.dp),
     ) {
         if (showRetry) {
+            // Retry CTA reuses the run CTA's enable gate so it goes
+            // inactive if the active server was cleared since the run
+            // ended (per @Lily PR #31 review msg `18946cd9` blocker 2).
             OutlinedButton(onClick = intents.submit, enabled = state.canSubmit) {
-                Text("再试一次")
+                Text(RunCopy.tryAgain.resolve(state.language))
             }
         } else if (showRun) {
             Button(onClick = intents.submit) {
-                Text("运行")
+                Text(RunCopy.run.resolve(state.language))
             }
         }
     }
@@ -270,7 +303,11 @@ private fun BottomBar(state: RunUiState, intents: RunIntents) {
 // ----------------------------------------------------------------- terminal sheets
 
 @Composable
-private fun TerminalFailureSheet(terminal: RunUiState.TerminalView.Failure, intents: RunIntents) {
+private fun TerminalFailureSheet(
+    terminal: RunUiState.TerminalView.Failure,
+    state: RunUiState,
+    intents: RunIntents,
+) {
     AlertDialog(
         onDismissRequest = intents.dismissTerminal,
         title = { Text(terminal.title) },
@@ -278,7 +315,7 @@ private fun TerminalFailureSheet(terminal: RunUiState.TerminalView.Failure, inte
             Column {
                 if (terminal.failingNodeDisplayName != null) {
                     Text(
-                        "失败节点：${terminal.failingNodeDisplayName}",
+                        RunCopy.failingNodeLabel(terminal.failingNodeDisplayName, state.language),
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -288,25 +325,39 @@ private fun TerminalFailureSheet(terminal: RunUiState.TerminalView.Failure, inte
             }
         },
         confirmButton = {
-            Button(onClick = intents.submit) { Text("再试一次") }
+            // Same canSubmit gate — if the active server is gone the
+            // retry button must NOT silently no-op (@Lily blocker 2).
+            Button(onClick = intents.submit, enabled = state.canSubmit) {
+                Text(RunCopy.tryAgain.resolve(state.language))
+            }
         },
         dismissButton = {
-            TextButton(onClick = intents.dismissTerminal) { Text("关闭") }
+            TextButton(onClick = intents.dismissTerminal) {
+                Text(RunCopy.close.resolve(state.language))
+            }
         },
     )
 }
 
 @Composable
-private fun TerminalCancelledSheet(terminal: RunUiState.TerminalView.Cancelled, intents: RunIntents) {
+private fun TerminalCancelledSheet(
+    terminal: RunUiState.TerminalView.Cancelled,
+    state: RunUiState,
+    intents: RunIntents,
+) {
     AlertDialog(
         onDismissRequest = intents.dismissTerminal,
-        title = { Text("已取消") },
-        text = { Text("本次生成已取消。") },
+        title = { Text(RunCopy.terminalCancelledTitle.resolve(state.language)) },
+        text = { Text(RunCopy.terminalCancelledBody.resolve(state.language)) },
         confirmButton = {
-            Button(onClick = intents.submit) { Text("再次运行") }
+            Button(onClick = intents.submit, enabled = state.canSubmit) {
+                Text(RunCopy.rerun.resolve(state.language))
+            }
         },
         dismissButton = {
-            TextButton(onClick = intents.dismissTerminal) { Text("关闭") }
+            TextButton(onClick = intents.dismissTerminal) {
+                Text(RunCopy.close.resolve(state.language))
+            }
         },
     )
 }

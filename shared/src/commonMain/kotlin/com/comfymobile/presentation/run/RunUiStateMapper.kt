@@ -5,6 +5,7 @@ import com.comfymobile.data.network.ReconnectReason
 import com.comfymobile.domain.run.RunError
 import com.comfymobile.domain.run.RunState
 import com.comfymobile.domain.run.toRuntimeStatusMap
+import com.comfymobile.presentation.connection.ConnectionLanguage
 
 /**
  * Pure-function projection from the run lifecycle + connection state +
@@ -34,6 +35,8 @@ object RunUiStateMapper {
         cancelConfirmOpen: Boolean = false,
         workflowTitle: String? = null,
         nodeDisplayNameByNodeId: (String) -> String? = { null },
+        language: ConnectionLanguage = ConnectionLanguage.En,
+        terminalDismissed: Boolean = false,
     ): RunUiState {
         val phase = projectPhase(runState, workflowTitle, nodeDisplayNameByNodeId)
         return RunUiState(
@@ -45,7 +48,12 @@ object RunUiStateMapper {
             runtimeStatusByNode = runState.toRuntimeStatusMap(),
             lastOutputThumbnail = (runState as? RunState.Running)?.firstOutput
                 ?: (runState as? RunState.Succeeded)?.outputs?.firstOrNull(),
-            terminal = projectTerminalView(runState, nodeDisplayNameByNodeId),
+            // Suppress the terminal sheet when the user has dismissed
+            // it (@Lily PR #31 blocker 1). The underlying RunState is
+            // still terminal — only the modal sheet hides.
+            terminal = if (terminalDismissed) null
+                else projectTerminalView(runState, nodeDisplayNameByNodeId, language),
+            language = language,
         )
     }
 
@@ -131,19 +139,18 @@ object RunUiStateMapper {
     private fun projectTerminalView(
         runState: RunState,
         nodeDisplayNameByNodeId: (String) -> String?,
+        language: ConnectionLanguage,
     ): RunUiState.TerminalView? = when (runState) {
         is RunState.Failed -> {
             val err = runState.error
-            val title = errorTitle(err)
-            val message = errorMessage(err)
             val failingNode = (err as? RunError.NodeException)?.let {
                 nodeDisplayNameByNodeId(it.nodeId) ?: it.nodeType
             }
             val traceback = (err as? RunError.NodeException)?.traceback
             RunUiState.TerminalView.Failure(
                 promptId = runState.promptId,
-                title = title,
-                message = message,
+                title = errorTitle(err, language),
+                message = errorMessage(err, language),
                 failingNodeDisplayName = failingNode,
                 tracebackJson = traceback,
             )
@@ -152,17 +159,27 @@ object RunUiStateMapper {
         else -> null
     }
 
-    private fun errorTitle(err: RunError): String = when (err) {
-        is RunError.ValidationFailed -> "工作流无法提交"
-        is RunError.NodeException -> "生成失败"
-        is RunError.Network -> "无法到达服务端"
-        is RunError.NoOutputs -> "未生成任何产物"
+    /**
+     * Resolve the failure-sheet title for an error kind. Strings live
+     * in [RunCopy] so a copy update lands in one place; the mapper just
+     * picks the right [com.comfymobile.presentation.connection.LocalizedText].
+     */
+    private fun errorTitle(err: RunError, language: ConnectionLanguage): String = when (err) {
+        is RunError.ValidationFailed -> RunCopy.errorTitleValidation.resolve(language)
+        is RunError.NodeException -> RunCopy.errorTitleNodeException.resolve(language)
+        is RunError.Network -> RunCopy.errorTitleNetwork.resolve(language)
+        is RunError.NoOutputs -> RunCopy.errorTitleNoOutputs.resolve(language)
     }
 
-    private fun errorMessage(err: RunError): String = when (err) {
-        is RunError.ValidationFailed -> "服务端拒绝了部分节点：${err.nodeErrors.keys.joinToString(", ")}"
+    private fun errorMessage(err: RunError, language: ConnectionLanguage): String = when (err) {
+        is RunError.ValidationFailed -> RunCopy.errorMessageValidation(
+            failingNodeIds = err.nodeErrors.keys.joinToString(", "),
+            language = language,
+        )
         is RunError.NodeException -> err.exceptionMessage.ifBlank { err.exceptionType }
-        is RunError.Network -> err.cause.message ?: err.cause::class.simpleName ?: "网络错误"
-        is RunError.NoOutputs -> "工作流执行成功但没有图片输出（缺少 SaveImage / PreviewImage 节点？）"
+        is RunError.Network -> err.cause.message
+            ?: err.cause::class.simpleName
+            ?: RunCopy.errorMessageNetworkFallback(language)
+        is RunError.NoOutputs -> RunCopy.errorMessageNoOutputs(language)
     }
 }

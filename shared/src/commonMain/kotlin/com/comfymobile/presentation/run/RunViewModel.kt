@@ -8,6 +8,7 @@ import com.comfymobile.domain.run.RunSubmission
 import com.comfymobile.domain.workflow.WorkflowEnvelope
 import com.comfymobile.domain.workflow.WorkflowFormat
 import com.comfymobile.domain.workflow.WorkflowGraph
+import com.comfymobile.presentation.connection.ConnectionLanguage
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -53,6 +54,7 @@ class RunViewModel(
     private val connectionState: KStateFlow<ConnectionState>,
     private val clientId: String,
     private val scope: CoroutineScope,
+    private val language: ConnectionLanguage = ConnectionLanguage.En,
 ) {
 
     /** Workflow the user has loaded; null until [prepare]. */
@@ -60,6 +62,20 @@ class RunViewModel(
 
     /** UI-only local state: the destructive cancel sheet. */
     private val cancelConfirmOpen = MutableStateFlow(false)
+
+    /**
+     * UI-only local state: when true, the surface suppresses the
+     * terminal Failed / Cancelled sheet even though the underlying
+     * `RunState` is still terminal. Resets to false whenever the user
+     * (re-)prepares a workflow or triggers a fresh submit — that
+     * transitions the run out of its terminal state anyway, but the
+     * reset is explicit so a stale "dismissed" flag doesn't outlive
+     * the sheet it was dismissed from.
+     *
+     * Per @Lily PR #31 review msg `18946cd9` blocker 1 — the previous
+     * `dismissTerminal()` was a no-op and the sheet couldn't close.
+     */
+    private val terminalDismissed = MutableStateFlow(false)
 
     /**
      * Lookup table from numeric node id (as it appears in the UI graph)
@@ -71,20 +87,38 @@ class RunViewModel(
 
     val uiState: StateFlow<RunUiState> =
         combine(
-            coordinator.state,
-            connectionState,
-            preparedWorkflow,
-            activeServer.current,
-            cancelConfirmOpen,
-        ) { run, conn, prepared, server, confirm ->
+            listOf(
+                coordinator.state,
+                connectionState,
+                preparedWorkflow,
+                activeServer.current,
+                cancelConfirmOpen,
+                terminalDismissed,
+            )
+        ) { values ->
+            @Suppress("UNCHECKED_CAST")
+            val run = values[0] as RunState
+            @Suppress("UNCHECKED_CAST")
+            val conn = values[1] as ConnectionState
+            @Suppress("UNCHECKED_CAST")
+            val prepared = values[2] as PreparedWorkflow?
+            @Suppress("UNCHECKED_CAST")
+            val server = values[3] as com.comfymobile.domain.server.ServerInfo?
+            val confirm = values[4] as Boolean
+            val dismissed = values[5] as Boolean
             RunUiStateMapper.project(
                 runState = run,
                 connectionState = conn,
-                hasPreparedWorkflow = prepared != null,
+                // Only UI-form workflows are submittable today; API-only
+                // envelopes would silently no-op in onSubmit so the CTA
+                // must reflect that (@Lily PR #31 blocker 4).
+                hasPreparedWorkflow = prepared != null && prepared.envelope.isSubmittable,
                 hasActiveServer = server != null,
                 cancelConfirmOpen = confirm,
                 workflowTitle = prepared?.label,
                 nodeDisplayNameByNodeId = { id -> nodeDisplayNames[id] },
+                language = language,
+                terminalDismissed = dismissed,
             )
         }.stateIn(
             scope = scope,
@@ -94,6 +128,7 @@ class RunViewModel(
                 connectionState = connectionState.value,
                 hasPreparedWorkflow = false,
                 hasActiveServer = activeServer.current.value != null,
+                language = language,
             ),
         )
 
@@ -110,6 +145,11 @@ class RunViewModel(
     fun prepare(prepared: PreparedWorkflow) {
         preparedWorkflow.value = prepared
         nodeDisplayNames = buildNodeDisplayNameIndex(prepared.envelope)
+        // Stale "dismissed" flag should not persist across a new
+        // workflow preparation — if the user dismissed the prior
+        // failure sheet and then loaded a different workflow, the new
+        // run's failure (if any) must surface fresh.
+        terminalDismissed.value = false
     }
 
     /**
@@ -127,6 +167,9 @@ class RunViewModel(
         if (!canSubmitNow(runState)) return
 
         val ui = prepared.envelope.ui ?: return
+        // Clear any leftover "terminal dismissed" flag from the prior
+        // run so the sheet surfaces fresh if this new run fails.
+        terminalDismissed.value = false
         val submission = RunSubmission(
             serverId = server.serverId,
             clientId = clientId,
@@ -164,17 +207,20 @@ class RunViewModel(
     }
 
     /**
-     * Clear the surfaced terminal sheet. For a Failed/Cancelled run the
-     * surface stays on the terminal phase until the user dismisses; the
-     * next [onSubmit] would replace the phase via the coordinator state
-     * transition Submitting → Queued → … anyway.
+     * Hide the surfaced terminal sheet (Failed / Cancelled).
+     *
+     * The underlying [RunState] remains terminal — it only changes on
+     * the next submit — but the surface stops rendering the modal
+     * sheet so the user can return to the workflow view. The flag
+     * resets on [prepare] or [onSubmit] so a future terminal surfaces
+     * fresh.
+     *
+     * Per @Lily PR #31 review msg `18946cd9` blocker 1: the prior
+     * implementation was a documentation-only no-op which meant the
+     * Close button on the sheet did nothing.
      */
     fun dismissTerminal() {
-        // No mutable state to clear: terminal display is derived purely
-        // from coordinator.state. Dismissal is a host-level concern
-        // (e.g. navigate away). Kept here as an explicit no-op to let
-        // the surface call a named function and have the intent be
-        // captured for future telemetry.
+        terminalDismissed.value = true
     }
 
     // ----------------------------------------------------------------- helpers
@@ -224,11 +270,21 @@ class RunViewModel(
  * API-only envelopes return null — the run flow can't submit them
  * without converting first, which is out of scope here.
  */
-private val WorkflowEnvelope.ui: WorkflowGraph.Ui?
+internal val WorkflowEnvelope.ui: WorkflowGraph.Ui?
     get() = when (format) {
         WorkflowFormat.UI -> (original as? JsonObject)?.let { WorkflowGraph.Ui(it) }
         WorkflowFormat.API -> null
     }
+
+/**
+ * True when this envelope can be submitted directly by [RunCoordinator].
+ * Today only UI-format envelopes are submittable (API-only ones would
+ * need an upstream conversion step we haven't built yet). Drives the
+ * `canSubmit` gate in [RunUiState] so the CTA isn't enabled for an
+ * envelope `onSubmit` would silently no-op on (@Lily PR #31 blocker 4).
+ */
+internal val WorkflowEnvelope.isSubmittable: Boolean
+    get() = ui != null
 
 /**
  * Re-serialise the UI snapshot to a JSON string for [com.comfymobile.domain.job.Job.workflowSnapshotJson].

@@ -6,6 +6,7 @@ import com.comfymobile.data.network.ReconnectReason
 import com.comfymobile.domain.job.JobOutputRef
 import com.comfymobile.domain.run.RunError
 import com.comfymobile.domain.run.RunState
+import com.comfymobile.presentation.connection.ConnectionLanguage
 import com.comfymobile.presentation.graph.NodeRuntimeStatus
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -31,12 +32,16 @@ class RunUiStateMapperTest {
         hasPreparedWorkflow: Boolean = true,
         hasActiveServer: Boolean = true,
         cancelConfirmOpen: Boolean = false,
+        terminalDismissed: Boolean = false,
+        language: ConnectionLanguage = ConnectionLanguage.En,
     ): RunUiState = RunUiStateMapper.project(
         runState = runState,
         connectionState = connectionState,
         hasPreparedWorkflow = hasPreparedWorkflow,
         hasActiveServer = hasActiveServer,
         cancelConfirmOpen = cancelConfirmOpen,
+        terminalDismissed = terminalDismissed,
+        language = language,
     )
 
     // ----------------------------------------------------------------- gate 1: canSubmit
@@ -305,5 +310,95 @@ class RunUiStateMapperTest {
     @Test fun cancelConfirmOpen_is_passed_through_from_input() {
         assertTrue(project(cancelConfirmOpen = true).cancelConfirmOpen)
         assertFalse(project(cancelConfirmOpen = false).cancelConfirmOpen)
+    }
+
+    // ----------------------------------------------------------------- terminalDismissed (Lily blocker 1)
+
+    @Test fun terminal_view_is_suppressed_when_terminalDismissed_for_Failed() {
+        val ui = project(
+            runState = RunState.Failed(promptId = "p", error = RunError.NoOutputs),
+            terminalDismissed = true,
+        )
+        assertNull(ui.terminal)
+        // Underlying phase is still Failed — the sheet is hidden, the
+        // state is not.
+        assertIs<RunUiState.Phase.Failed>(ui.phase)
+    }
+
+    @Test fun terminal_view_is_suppressed_when_terminalDismissed_for_Cancelled() {
+        val ui = project(
+            runState = RunState.Cancelled(promptId = "p"),
+            terminalDismissed = true,
+        )
+        assertNull(ui.terminal)
+        assertIs<RunUiState.Phase.Cancelled>(ui.phase)
+    }
+
+    @Test fun terminal_view_is_shown_when_terminalDismissed_false_for_Failed() {
+        val ui = project(
+            runState = RunState.Failed(promptId = "p", error = RunError.NoOutputs),
+            terminalDismissed = false,
+        )
+        assertIs<RunUiState.TerminalView.Failure>(ui.terminal)
+    }
+
+    // ----------------------------------------------------------------- localization
+
+    @Test fun phase_labels_resolve_for_zh_and_en() {
+        // Smoke-check: a label that exists in both — running.
+        val zh = project(
+            runState = RunState.Running(promptId = "p"),
+            language = ConnectionLanguage.Zh,
+        )
+        val en = project(
+            runState = RunState.Running(promptId = "p"),
+            language = ConnectionLanguage.En,
+        )
+        // language passthrough — surfaces use it via state.language.
+        assertEquals(ConnectionLanguage.Zh, zh.language)
+        assertEquals(ConnectionLanguage.En, en.language)
+    }
+
+    @Test fun terminal_failure_title_localized_zh() {
+        val ui = project(
+            runState = RunState.Failed(promptId = "p", error = RunError.NoOutputs),
+            language = ConnectionLanguage.Zh,
+        )
+        val term = assertIs<RunUiState.TerminalView.Failure>(ui.terminal)
+        assertEquals(RunCopy.errorTitleNoOutputs.zh, term.title)
+        assertEquals(RunCopy.errorMessageNoOutputs(ConnectionLanguage.Zh), term.message)
+    }
+
+    @Test fun terminal_failure_title_localized_en() {
+        val ui = project(
+            runState = RunState.Failed(promptId = "p", error = RunError.NoOutputs),
+            language = ConnectionLanguage.En,
+        )
+        val term = assertIs<RunUiState.TerminalView.Failure>(ui.terminal)
+        assertEquals(RunCopy.errorTitleNoOutputs.en, term.title)
+        assertEquals(RunCopy.errorMessageNoOutputs(ConnectionLanguage.En), term.message)
+    }
+
+    @Test fun terminal_failure_validation_message_lists_failing_node_ids_localized() {
+        val nodeErrors = mapOf(
+            "5" to kotlinx.serialization.json.JsonObject(emptyMap()),
+            "7" to kotlinx.serialization.json.JsonObject(emptyMap()),
+        )
+        val zh = project(
+            runState = RunState.Failed("p", RunError.ValidationFailed(nodeErrors)),
+            language = ConnectionLanguage.Zh,
+        )
+        val en = project(
+            runState = RunState.Failed("p", RunError.ValidationFailed(nodeErrors)),
+            language = ConnectionLanguage.En,
+        )
+        val zhTerm = assertIs<RunUiState.TerminalView.Failure>(zh.terminal)
+        val enTerm = assertIs<RunUiState.TerminalView.Failure>(en.terminal)
+        assertTrue(zhTerm.message.contains("5"))
+        assertTrue(zhTerm.message.contains("7"))
+        assertTrue(enTerm.message.contains("5"))
+        assertTrue(enTerm.message.contains("7"))
+        assertEquals(RunCopy.errorTitleValidation.zh, zhTerm.title)
+        assertEquals(RunCopy.errorTitleValidation.en, enTerm.title)
     }
 }

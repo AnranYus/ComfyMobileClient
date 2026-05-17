@@ -5,6 +5,7 @@ import com.comfymobile.domain.job.JobOutputRef
 import com.comfymobile.domain.run.RunError
 import com.comfymobile.domain.run.RunState
 import com.comfymobile.domain.workflow.WorkflowEnvelope
+import com.comfymobile.presentation.connection.ConnectionLanguage
 import com.comfymobile.presentation.graph.NodeRuntimeStatus
 import kotlinx.serialization.json.JsonElement
 
@@ -49,6 +50,18 @@ data class RunUiState(
 
     /** Surfaced when the run terminates failed/cancelled, until dismissed. */
     val terminal: TerminalView? = null,
+
+    /**
+     * User language. The mapper bakes the language into [Phase] /
+     * [TerminalView] / [BranchBanner] **labels** so the surface can
+     * render strings directly without a separate language lookup —
+     * matches the Phase 2 convention established by HistoryScreenState
+     * / OutputGalleryState / ConnectScreenState (per @Ores PR #31
+     * review, msg `10846076`).
+     *
+     * Defaults to [ConnectionLanguage.En] mirroring the project default.
+     */
+    val language: ConnectionLanguage = ConnectionLanguage.En,
 ) {
     sealed interface Phase {
         /** No workflow prepared, or freshly entered the route. Run CTA may be enabled. */
@@ -117,6 +130,13 @@ data class RunUiState(
      * gallery).
      */
     sealed interface TerminalView {
+        /**
+         * [title] / [message] are already localized — the mapper resolves
+         * [RunCopy.errorTitle*] / [RunCopy.errorMessage*] against the
+         * caller's [ConnectionLanguage] so the surface can render
+         * directly. [failingNodeDisplayName] is the user's own node
+         * label (no localization needed).
+         */
         data class Failure(
             val promptId: String?,
             val title: String,

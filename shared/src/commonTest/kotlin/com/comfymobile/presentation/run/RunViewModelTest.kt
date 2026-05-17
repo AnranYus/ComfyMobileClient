@@ -248,6 +248,102 @@ class RunViewModelTest {
         assertFalse(state.cancelConfirmOpen)
     }
 
+    // ----------------------------------------------------------------- Lily blocker 1: dismissTerminal hides sheet
+
+    @Test fun dismissTerminal_hides_the_terminal_sheet_even_though_RunState_is_terminal() = runTest {
+        val ws = ChannelWs()
+        val (vm, coordinator) = vm(ws = ws, scope = this)
+        vm.prepare(PreparedWorkflow(envelope = envelope()))
+
+        val terminalDeferred = async(Dispatchers.Unconfined) { coordinator.run(
+            com.comfymobile.domain.run.RunSubmission(
+                serverId = "127.0.0.1:8188",
+                clientId = "test-client",
+                workflowUi = com.comfymobile.domain.workflow.WorkflowGraph.Ui(envelope().original as JsonObject),
+            )
+        ) }
+        coordinator.state.first { it is RunState.Queued }
+        ws.send(WsEvent.ExecutionStart(promptId = "p-1"))
+        ws.send(WsEvent.ExecutionError(
+            promptId = "p-1",
+            nodeId = "1",
+            nodeType = "X",
+            executed = emptyList(),
+            exceptionMessage = "boom",
+            exceptionType = "RuntimeError",
+        ))
+        withTimeout(1_000) { terminalDeferred.await() }
+
+        // Terminal sheet is visible until dismissed.
+        assertIs<RunUiState.TerminalView.Failure>(vm.uiState.first { it.terminal != null }.terminal)
+
+        vm.dismissTerminal()
+        val afterDismiss = vm.uiState.first { it.terminal == null }
+        // Sheet hidden, but the phase remains Failed.
+        assertIs<RunUiState.Phase.Failed>(afterDismiss.phase)
+    }
+
+    @Test fun terminal_sheet_resurfaces_after_prepare_clears_dismissed_flag() = runTest {
+        val ws = ChannelWs()
+        val (vm, coordinator) = vm(ws = ws, scope = this)
+        vm.prepare(PreparedWorkflow(envelope = envelope()))
+
+        val deferred = async(Dispatchers.Unconfined) { coordinator.run(
+            com.comfymobile.domain.run.RunSubmission(
+                serverId = "127.0.0.1:8188",
+                clientId = "test-client",
+                workflowUi = com.comfymobile.domain.workflow.WorkflowGraph.Ui(envelope().original as JsonObject),
+            )
+        ) }
+        coordinator.state.first { it is RunState.Queued }
+        ws.send(WsEvent.ExecutionStart(promptId = "p-1"))
+        ws.send(WsEvent.ExecutionError(
+            promptId = "p-1", nodeId = "1", nodeType = "X", executed = emptyList(),
+            exceptionMessage = "boom", exceptionType = "RuntimeError",
+        ))
+        withTimeout(1_000) { deferred.await() }
+
+        vm.uiState.first { it.terminal != null }
+        vm.dismissTerminal()
+        vm.uiState.first { it.terminal == null }
+
+        // Preparing a new workflow resets the dismissed flag, so the
+        // existing terminal RunState surfaces again until cleared by
+        // a fresh successful submit. (Models the case where the user
+        // dismissed the sheet, navigated, loaded a new workflow, and
+        // the prior failure should be visible again until they retry.)
+        vm.prepare(PreparedWorkflow(envelope = envelope(label = "another")))
+        val afterPrepare = vm.uiState.first { it.terminal != null }
+        assertIs<RunUiState.TerminalView.Failure>(afterPrepare.terminal)
+    }
+
+    // ----------------------------------------------------------------- Lily blocker 4: API-only envelope CTA gate
+
+    @Test fun canSubmit_is_false_when_only_API_format_envelope_is_prepared() = runTest {
+        val (vm, _) = vm(scope = this)
+        val apiOnly = WorkflowEnvelope(
+            original = buildJsonObject {
+                put("1", buildJsonObject {
+                    put("class_type", JsonPrimitive("CheckpointLoaderSimple"))
+                    put("inputs", buildJsonObject {
+                        put("ckpt_name", JsonPrimitive("model.safetensors"))
+                    })
+                })
+            },
+            format = WorkflowFormat.API,
+            metadata = WorkflowMetadata(
+                label = "api-only workflow",
+                createdAtEpochMs = 1_700_000_000_000L,
+                lastEditedAtEpochMs = 1_700_000_000_000L,
+            ),
+        )
+        vm.prepare(PreparedWorkflow(envelope = apiOnly))
+        val state = vm.uiState.first { true }
+        // CTA must NOT be enabled — onSubmit would silently no-op for
+        // an API-only envelope.
+        assertFalse(state.canSubmit)
+    }
+
     @Test fun dismissCancel_closes_confirm_without_triggering_coordinator() = runTest {
         val cancel = RecordingCancel()
         val ws = ChannelWs()
