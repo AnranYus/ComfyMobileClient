@@ -11,6 +11,7 @@ import android.provider.MediaStore
 import androidx.core.content.FileProvider
 import com.comfymobile.data.platform.PlatformContext
 import io.ktor.client.HttpClient
+import kotlinx.coroutines.CancellationException
 import java.io.File
 
 actual fun createOutputGalleryActionGateway(
@@ -69,31 +70,57 @@ private class AndroidOutputGallerySaveBridge(
         }
         val uri: Uri = resolver.insert(collection, pending)
             ?: return OutputGalleryActionResult.Failed("MediaStore insert returned null")
+        // Single rollback path used by every error branch below. Per
+        // @Lily PR #38 review (`4472135830`): any failure AFTER insert
+        // MUST delete the pending row so we don't leak a half-written
+        // (or 0-byte) ghost entry into the gallery.
         return try {
-            resolver.openOutputStream(uri).use { out ->
-                if (out == null) {
-                    OutputGalleryActionResult.Failed("Cannot open MediaStore output stream")
-                } else {
-                    out.write(payload.bytes)
-                    out.flush()
-                    // Phase 2 of two-phase MediaStore insert: clear
-                    // IS_PENDING so the image becomes visible to the
-                    // photo gallery and other apps.
-                    val finalize = ContentValues().apply {
-                        put(MediaStore.Images.Media.IS_PENDING, 0)
-                    }
-                    resolver.update(uri, finalize, null, null)
-                    OutputGalleryActionResult.Success
-                }
+            val stream = resolver.openOutputStream(uri)
+            if (stream == null) {
+                resolver.tryDelete(uri)
+                return OutputGalleryActionResult.Failed("Cannot open MediaStore output stream")
             }
+            stream.use { out ->
+                out.write(payload.bytes)
+                out.flush()
+            }
+            // Phase 2 of two-phase MediaStore insert: clear IS_PENDING
+            // so the image becomes visible to the photo gallery and
+            // other apps. `update` returns the number of rows actually
+            // modified — per @Lily PR #38 review (`4472135830`) we
+            // MUST treat a zero-row update as failure (the row may
+            // have been deleted by the system between insert and
+            // finalize) and roll back accordingly. Only an actual
+            // affected-row count of ≥1 counts as Success.
+            val finalize = ContentValues().apply {
+                put(MediaStore.Images.Media.IS_PENDING, 0)
+            }
+            val affected = resolver.update(uri, finalize, null, null)
+            if (affected <= 0) {
+                resolver.tryDelete(uri)
+                OutputGalleryActionResult.Failed("MediaStore finalize update affected 0 rows")
+            } else {
+                OutputGalleryActionResult.Success
+            }
+        } catch (ce: CancellationException) {
+            resolver.tryDelete(uri)
+            throw ce
         } catch (t: Throwable) {
-            // Roll back the pending row so we don't leave a 0-byte
-            // entry visible in the gallery.
-            try {
-                resolver.delete(uri, null, null)
-            } catch (_: Throwable) { /* swallow rollback error */ }
+            resolver.tryDelete(uri)
             OutputGalleryActionResult.Failed(t.message)
         }
+    }
+
+    /**
+     * Best-effort pending-row rollback. Failures inside this helper
+     * are intentionally swallowed — surfacing the rollback error
+     * would mask the original failure, and the row will eventually be
+     * collected by MediaStore even if delete fails here.
+     */
+    private fun android.content.ContentResolver.tryDelete(uri: Uri) {
+        try {
+            delete(uri, null, null)
+        } catch (_: Throwable) { /* swallow rollback error */ }
     }
 
     private fun String.sanitizedFileName(): String {
