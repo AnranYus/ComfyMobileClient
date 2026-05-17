@@ -336,6 +336,44 @@ class RunCoordinatorTest {
         assertEquals(JobStatus.INTERRUPTED, jobs.getByPromptId("p-1")!!.status)
     }
 
+    /**
+     * @Lily PR #30 race regression (msg `42ee1862`):
+     *
+     * The local cancel signal MUST survive the publication window between
+     * `state.value = Queued` and the reducer's cancel-collector becoming
+     * active. The previous SharedFlow(replay=0) approach lost signals
+     * emitted before subscription; the fix routes them through a Channel
+     * whose reference is published BEFORE state.value = Queued, so any
+     * caller observing Queued can always reach a buffered signal slot.
+     *
+     * Behavioral cover: observe Queued → call requestCancel synchronously
+     * → expect Cancelled terminal, NO WS event, NO ws.close().
+     */
+    @Test fun cancel_immediately_after_observing_Queued_terminates_without_ws_event() = runTest {
+        val cancel = RecordingCancel()
+        val ws = ChannelWs()
+        val jobs = InMemoryJobRepository()
+        val (c, _) = coord(cancel = cancel, ws = ws, jobs = jobs)
+
+        val deferred = async(Dispatchers.Unconfined) { c.run(submission()) }
+
+        // The MOMENT Queued is observed, call requestCancel — this is the
+        // race window. Under the previous SharedFlow(replay=0) implementation
+        // the cancel-signal collector might not yet be subscribed, and the
+        // signal would be silently dropped, leaving the run hung.
+        c.state.first { it is RunState.Queued }
+        val route = c.requestCancel()
+
+        assertIs<CancelRoute.DeleteQueued>(route)
+        // Channel-based pathway means: no WS event is sent, ws.close() is
+        // never called, and yet the run must terminate.
+        val terminal = withTimeout(1_000) { deferred.await() }
+        val cancelled = assertIs<RunState.Cancelled>(terminal)
+        assertEquals("p-1", cancelled.promptId)
+        assertEquals(JobStatus.INTERRUPTED, jobs.getByPromptId("p-1")!!.status)
+        assertEquals(listOf("p-1"), cancel.deleteCalls)
+    }
+
     @Test fun requestCancel_in_Running_state_routes_to_InterruptRunning_and_waits_for_server_event() = runTest {
         val cancel = RecordingCancel()
         val ws = ChannelWs()

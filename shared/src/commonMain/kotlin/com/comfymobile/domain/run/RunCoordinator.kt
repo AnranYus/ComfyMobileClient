@@ -11,11 +11,9 @@ import com.comfymobile.domain.workflow.WorkflowGraph
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.serialization.json.JsonArray
@@ -88,23 +86,23 @@ class RunCoordinator(
     private val runMutex = Mutex()
 
     /**
-     * Signal channel used by [requestCancel] to deliver a synthesised
-     * `Terminal` into the [driveWsLifecycle] reducer for cases where
-     * the server is NOT going to emit a follow-up WS event.
+     * Reference to the current run's local-cancel pathway. Published
+     * BEFORE [_state] transitions to [RunState.Queued] so external
+     * callers that observe Queued and immediately call [requestCancel]
+     * can never see a `null` cancel channel (per @Lily PR #30 review
+     * msg `42ee1862`).
      *
-     * Concrete case (per @Lily T2.3 review on PR #30, msg `49b81084`):
-     * `POST /queue {"delete":[promptId]}` for a queued prompt that
-     * never started executing — ComfyUI removes it silently and does
-     * NOT emit `execution_interrupted`. Without this signal the run
-     * loop would block forever on a `/ws` connection that is by design
-     * long-lived and never closes.
+     * A [Channel] (rather than a SharedFlow) carries the signal because
+     * Channel semantics decouple send from receive — the buffered value
+     * sits in the channel regardless of whether the reducer's collector
+     * coroutine has subscribed yet. SharedFlow with `replay = 0` would
+     * drop the signal if no subscriber is active at emit time, which is
+     * exactly the race condition we need to avoid.
      *
-     * Signals are tagged with the originating `promptId` so a stale
-     * signal from a previous run is filtered out by the new run's
-     * collector instead of polluting it.
+     * The reference is cleared in [executeRun]'s `finally` so a stale
+     * channel from a previous run cannot be reused.
      */
-    private val forceTerminalSignal =
-        MutableSharedFlow<ForceTerminalSignal>(extraBufferCapacity = 1)
+    private val activeCancelChannel = MutableStateFlow<ActiveCancelChannel?>(null)
 
     /**
      * Runs a single workflow end-to-end.
@@ -160,13 +158,19 @@ class RunCoordinator(
             is RunState.Queued -> {
                 cancel.deleteQueued(current.promptId)
                 // Locally finalize since the server will not emit an
-                // execution_interrupted event for queue-deletes.
-                forceTerminalSignal.tryEmit(
-                    ForceTerminalSignal(
-                        promptId = current.promptId,
-                        terminal = Terminal.Cancelled(fromNodeId = null),
-                    )
-                )
+                // execution_interrupted event for queue-deletes. The
+                // cancel channel was published before state = Queued so
+                // it is guaranteed visible by the time we get here (per
+                // @Lily PR #30 race fix, msg `42ee1862`).
+                val slot = activeCancelChannel.value
+                if (slot != null && slot.promptId == current.promptId) {
+                    // trySend never blocks: Channel.capacity = 1 means
+                    // the value sits in the buffer until the reducer's
+                    // cancel collector reads it. Subscription order is
+                    // irrelevant — that's why we use Channel, not
+                    // SharedFlow.
+                    slot.channel.trySend(Terminal.Cancelled(fromNodeId = null))
+                }
                 CancelRoute.DeleteQueued(current.promptId)
             }
             else -> null
@@ -209,51 +213,73 @@ class RunCoordinator(
             )
         }
 
-        // 3. Persist the queued row before listening to WS so a crash
-        //    between submit and event arrival still leaves a recoverable
-        //    history entry.
-        val createdAt = clock.nowEpochMs()
-        jobs.upsert(
-            Job(
-                promptId = response.prompt_id,
-                serverId = submission.serverId,
-                status = JobStatus.QUEUED,
-                workflowSnapshotJson = submission.workflowSnapshotJson,
-                apiPromptJson = null, // optional; large; skipped for now
-                label = submission.label,
-                firstOutput = null,
-                createdAtEpochMs = createdAt,
-                finishedAtEpochMs = null,
-            )
-        )
-
-        _state.value = RunState.Queued(
+        // 3. Set up the local-cancel channel BEFORE publishing
+        //    state = Queued. An external observer that sees Queued and
+        //    immediately calls requestCancel MUST be able to find a
+        //    working channel — otherwise the cancel signal is lost. Per
+        //    @Lily PR #30 race blocker, msg `42ee1862`.
+        val cancelChannel = Channel<Terminal>(capacity = 1)
+        activeCancelChannel.value = ActiveCancelChannel(
             promptId = response.prompt_id,
-            queuePosition = response.number,
+            channel = cancelChannel,
         )
 
-        // 4. Drive the WS state machine.
-        return try {
-            driveWsLifecycle(
-                promptId = response.prompt_id,
-                clientId = submission.clientId,
-                serverId = submission.serverId,
+        try {
+            // 4. Persist the queued row before listening to WS so a crash
+            //    between submit and event arrival still leaves a recoverable
+            //    history entry.
+            val createdAt = clock.nowEpochMs()
+            jobs.upsert(
+                Job(
+                    promptId = response.prompt_id,
+                    serverId = submission.serverId,
+                    status = JobStatus.QUEUED,
+                    workflowSnapshotJson = submission.workflowSnapshotJson,
+                    apiPromptJson = null, // optional; large; skipped for now
+                    label = submission.label,
+                    firstOutput = null,
+                    createdAtEpochMs = createdAt,
+                    finishedAtEpochMs = null,
+                )
             )
-        } catch (t: Throwable) {
-            if (t is CancellationException) {
-                // Scope cancelled: leave state where it is unless we
-                // never reached a terminal — in that case reset to Idle
-                // so we don't leave a stuck Submitting/Queued/Running.
-                if (!_state.value.isTerminal()) {
-                    _state.value = RunState.Idle
+
+            _state.value = RunState.Queued(
+                promptId = response.prompt_id,
+                queuePosition = response.number,
+            )
+
+            // 5. Drive the WS state machine.
+            return try {
+                driveWsLifecycle(
+                    promptId = response.prompt_id,
+                    clientId = submission.clientId,
+                    serverId = submission.serverId,
+                    cancelChannel = cancelChannel,
+                )
+            } catch (t: Throwable) {
+                if (t is CancellationException) {
+                    // Scope cancelled: leave state where it is unless we
+                    // never reached a terminal — in that case reset to Idle
+                    // so we don't leave a stuck Submitting/Queued/Running.
+                    if (!_state.value.isTerminal()) {
+                        _state.value = RunState.Idle
+                    }
+                    throw t
                 }
-                throw t
+                finalizeFailed(
+                    promptId = response.prompt_id,
+                    error = RunError.Network(t),
+                    persistJob = true,
+                )
             }
-            finalizeFailed(
-                promptId = response.prompt_id,
-                error = RunError.Network(t),
-                persistJob = true,
-            )
+        } finally {
+            // Always clear the active cancel ref and close the channel so
+            // a stale channel from this run cannot be used by a future
+            // requestCancel call. Cleared AFTER driveWsLifecycle returns,
+            // by which point state is terminal and requestCancel would be
+            // a no-op anyway.
+            activeCancelChannel.value = null
+            cancelChannel.close()
         }
     }
 
@@ -304,6 +330,7 @@ class RunCoordinator(
         promptId: String,
         clientId: String,
         serverId: String,
+        cancelChannel: Channel<Terminal>,
     ): RunState = coroutineScope {
         val inputs = Channel<MachineInput>(capacity = Channel.UNLIMITED)
 
@@ -321,12 +348,17 @@ class RunCoordinator(
             }
         }
 
+        // Drain the per-run cancel channel into the reducer's input
+        // stream. The channel exists BEFORE state = Queued (see
+        // executeRun), so any signal sent by requestCancel between
+        // Queued-publication and this coroutine starting its for-loop
+        // sits in the channel's 1-slot buffer and is read immediately
+        // when forceJob enters its iteration. There is no subscribe-gap
+        // race because Channel decouples send from receive.
         val forceJob = launch {
-            forceTerminalSignal
-                .filter { it.promptId == promptId }
-                .collect { signal ->
-                    inputs.trySend(MachineInput.Force(signal.terminal))
-                }
+            for (terminal in cancelChannel) {
+                inputs.trySend(MachineInput.Force(terminal))
+            }
         }
 
         var snapshot = MachineSnapshot(promptId = promptId)
@@ -516,13 +548,14 @@ internal sealed interface MachineInput {
 }
 
 /**
- * Carrier for [RunCoordinator.forceTerminalSignal]. The `promptId` tag
- * lets a new run filter out a stale signal left over from a previous
- * run that completed before the signal was consumed.
+ * Carrier for [RunCoordinator.activeCancelChannel]. The `promptId` tag
+ * is checked by [RunCoordinator.requestCancel] before sending so a
+ * cleanup race (channel cleared mid-cancel) cannot deliver a signal
+ * meant for a prior run.
  */
-internal data class ForceTerminalSignal(
+internal data class ActiveCancelChannel(
     val promptId: String,
-    val terminal: Terminal,
+    val channel: Channel<Terminal>,
 )
 
 /**
