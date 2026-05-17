@@ -47,10 +47,22 @@ expect fun createOutputGalleryActionGateway(
 class HttpDownloadingOutputGalleryActionGateway(
     private val httpClient: HttpClient,
     private val shareBridge: OutputGalleryShareBridge,
+    /**
+     * Platform save bridge — wires `save()` into the OS photo library
+     * (Android MediaStore, iOS PhotoKit). When `null` the gateway
+     * reports `canSave() = false` and `save()` returns
+     * [OutputGalleryActionResult.Unsupported], preserving the original
+     * disabled-placeholder behaviour. Platforms add their own
+     * implementation in `createOutputGalleryActionGateway` actuals.
+     */
+    private val saveBridge: OutputGallerySaveBridge? = null,
 ) : OutputGalleryActionGateway {
 
     override fun canShare(target: OutputGalleryActionTarget): Boolean =
         !target.imageUrl.isNullOrBlank()
+
+    override fun canSave(target: OutputGalleryActionTarget): Boolean =
+        saveBridge != null && !target.imageUrl.isNullOrBlank()
 
     override suspend fun share(target: OutputGalleryActionTarget): OutputGalleryActionResult {
         val imageUrl = target.imageUrl ?: return OutputGalleryActionResult.Unsupported
@@ -70,6 +82,26 @@ class HttpDownloadingOutputGalleryActionGateway(
             OutputGalleryActionResult.Failed(t.message)
         }
     }
+
+    override suspend fun save(target: OutputGalleryActionTarget): OutputGalleryActionResult {
+        val bridge = saveBridge ?: return OutputGalleryActionResult.Unsupported
+        val imageUrl = target.imageUrl ?: return OutputGalleryActionResult.Unsupported
+        return try {
+            val bytes: ByteArray = httpClient.get(imageUrl).body()
+            bridge.save(
+                payload = OutputGallerySavePayload(
+                    bytes = bytes,
+                    fileName = target.ref.filename,
+                    mimeType = target.ref.mimeType,
+                    contentDescription = target.contentDescription,
+                ),
+            )
+        } catch (ce: CancellationException) {
+            throw ce
+        } catch (t: Throwable) {
+            OutputGalleryActionResult.Failed(t.message)
+        }
+    }
 }
 
 fun interface OutputGalleryShareBridge {
@@ -77,6 +109,33 @@ fun interface OutputGalleryShareBridge {
 }
 
 data class OutputGallerySharePayload(
+    val bytes: ByteArray,
+    val fileName: String,
+    val mimeType: String,
+    val contentDescription: String,
+)
+
+/**
+ * Platform save-to-photo-library bridge. The common gateway downloads
+ * the image bytes via Ktor and hands the payload off to this bridge,
+ * which writes to the OS-managed gallery via MediaStore (Android) /
+ * PhotoKit (iOS).
+ *
+ * Mirror shape of [OutputGalleryShareBridge] so the two bridges can be
+ * tested with the same recording fakes (per @Lily PR #33 pattern of
+ * keeping platform seams small and uniform).
+ */
+fun interface OutputGallerySaveBridge {
+    suspend fun save(payload: OutputGallerySavePayload): OutputGalleryActionResult
+}
+
+/**
+ * Save-to-photo-library payload. Identical shape to
+ * [OutputGallerySharePayload]; kept as a separate type so platform
+ * impls can evolve independently (e.g. an iOS save bridge may add
+ * PHAssetCollection album hints that a share bridge wouldn't need).
+ */
+data class OutputGallerySavePayload(
     val bytes: ByteArray,
     val fileName: String,
     val mimeType: String,
