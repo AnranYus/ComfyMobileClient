@@ -18,9 +18,9 @@ import com.comfymobile.data.platform.PlatformContext
 import com.comfymobile.data.platform.createSettings
 import com.comfymobile.data.platform.createSqlDriver
 import com.comfymobile.data.platform.nowEpochMs
-import com.comfymobile.data.run.ActiveServerCancelPort
-import com.comfymobile.data.run.ActiveServerPromptPort
-import com.comfymobile.data.run.ActiveServerWsEventPort
+import com.comfymobile.data.run.HttpClientCancelPort
+import com.comfymobile.data.run.HttpClientPromptPort
+import com.comfymobile.data.run.WebSocketSourceWsEventPort
 import com.comfymobile.data.workflow.WorkflowImporter
 import com.comfymobile.db.ComfyMobileDb
 import com.comfymobile.data.descriptor.NodeDescriptorRegistry
@@ -321,17 +321,20 @@ fun appModule(): Module = module {
 
     // ----------------------------------------------------------------- T2.3 run-loop wiring
     //
-    // Active-server-aware adapters: each call snapshots the current
-    // baseUrl from ActiveServerHolder and asks the per-server factory
-    // for a fresh client. Per @Lily T2.3 review pattern: tests inject
-    // RunCoordinator with fakes; production code goes through these
-    // singletons. RunCoordinator is a singleton because there is one
-    // logical "active run" per process; concurrent runs are rejected
-    // by its internal mutex.
+    // The run-loop port adapters take baseUrl as a per-call parameter
+    // (per @Lily PR #31 msg `8bbd4fa1` — a mid-run active-server switch
+    // must NOT redirect WS / cancel calls to a different server). The
+    // coordinator pins the baseUrl at submission time and threads it
+    // through every port call. The adapters here are stateless
+    // factory-fronts; the active-server snapshot lives in the
+    // RunViewModel.onSubmit, not in the adapters.
+    //
+    // RunCoordinator is a singleton because there is one logical
+    // "active run" per process; concurrent runs are rejected by its
+    // internal mutex.
 
     single<PromptSubmissionPort> {
-        ActiveServerPromptPort(
-            activeServer = get(),
+        HttpClientPromptPort(
             httpClientFactory = { baseUrl ->
                 get<ComfyHttpClient> { org.koin.core.parameter.parametersOf(baseUrl) }
             },
@@ -339,8 +342,7 @@ fun appModule(): Module = module {
     }
 
     single<CancelPort> {
-        ActiveServerCancelPort(
-            activeServer = get(),
+        HttpClientCancelPort(
             httpClientFactory = { baseUrl ->
                 get<ComfyHttpClient> { org.koin.core.parameter.parametersOf(baseUrl) }
             },
@@ -348,8 +350,7 @@ fun appModule(): Module = module {
     }
 
     single<WsEventPort> {
-        ActiveServerWsEventPort(
-            activeServer = get(),
+        WebSocketSourceWsEventPort(
             webSocketSourceFactory = { baseUrl ->
                 get<WebSocketSource> { org.koin.core.parameter.parametersOf(baseUrl) }
             },

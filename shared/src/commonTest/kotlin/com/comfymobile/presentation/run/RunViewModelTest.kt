@@ -21,6 +21,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -83,6 +84,7 @@ class RunViewModelTest {
 
     private val testServer = ServerInfo(
         serverId = "127.0.0.1:8188",
+                baseUrl = "http://127.0.0.1:8188",
         host = "127.0.0.1",
         port = 8188,
         label = "Local",
@@ -93,22 +95,30 @@ class RunViewModelTest {
         private val response: PromptResponseDto = PromptResponseDto(prompt_id = "p-1", number = 0),
     ) : PromptSubmissionPort {
         var calls = 0
-        override suspend fun submit(request: PromptRequestDto): PromptResponseDto {
+        val baseUrls = mutableListOf<String>()
+        override suspend fun submit(baseUrl: String, request: PromptRequestDto): PromptResponseDto {
             calls += 1
+            baseUrls += baseUrl
             return response
         }
     }
 
     private class RecordingCancel : CancelPort {
-        var interruptCalls = mutableListOf<String>()
-        var deleteCalls = mutableListOf<String>()
-        override suspend fun interruptRunning(promptId: String) { interruptCalls += promptId }
-        override suspend fun deleteQueued(promptId: String) { deleteCalls += promptId }
+        val interruptCalls = mutableListOf<Pair<String, String>>()
+        val deleteCalls = mutableListOf<Pair<String, String>>()
+        override suspend fun interruptRunning(baseUrl: String, promptId: String) {
+            interruptCalls += baseUrl to promptId
+        }
+        override suspend fun deleteQueued(baseUrl: String, promptId: String) {
+            deleteCalls += baseUrl to promptId
+        }
+        val interruptPromptIds: List<String> get() = interruptCalls.map { it.second }
+        val deletePromptIds: List<String> get() = deleteCalls.map { it.second }
     }
 
     private class ChannelWs : WsEventPort {
         val sessions = mutableListOf<Channel<WsEvent>>()
-        override fun events(clientId: String): Flow<WsEvent> {
+        override fun events(baseUrl: String, clientId: String): Flow<WsEvent> {
             val c = Channel<WsEvent>(capacity = Channel.UNLIMITED)
             sessions += c
             return c.consumeAsFlow()
@@ -181,6 +191,7 @@ class RunViewModelTest {
         val terminalDeferred = async(Dispatchers.Unconfined) { coordinator.run(
             com.comfymobile.domain.run.RunSubmission(
                 serverId = "127.0.0.1:8188",
+                baseUrl = "http://127.0.0.1:8188",
                 clientId = "test-client",
                 workflowUi = com.comfymobile.domain.workflow.WorkflowGraph.Ui(
                     (envelope().original as JsonObject),
@@ -199,8 +210,8 @@ class RunViewModelTest {
         val terminal = withTimeout(1_000) { terminalDeferred.await() }
         assertIs<RunState.Cancelled>(terminal)
         // Gate 4: cancel route was the queued one (deleteQueued), not interrupt.
-        assertEquals(listOf("p-1"), cancel.deleteCalls)
-        assertEquals(emptyList<String>(), cancel.interruptCalls)
+        assertEquals(listOf("p-1"), cancel.deletePromptIds)
+        assertEquals(emptyList<String>(), cancel.interruptPromptIds)
     }
 
     @Test fun requestCancel_then_confirmCancel_routes_through_coordinator_for_Running() = runTest {
@@ -212,6 +223,7 @@ class RunViewModelTest {
         val terminalDeferred = async(Dispatchers.Unconfined) { coordinator.run(
             com.comfymobile.domain.run.RunSubmission(
                 serverId = "127.0.0.1:8188",
+                baseUrl = "http://127.0.0.1:8188",
                 clientId = "test-client",
                 workflowUi = com.comfymobile.domain.workflow.WorkflowGraph.Ui(
                     (envelope().original as JsonObject),
@@ -233,8 +245,8 @@ class RunViewModelTest {
         val terminal = withTimeout(1_000) { terminalDeferred.await() }
         assertIs<RunState.Cancelled>(terminal)
         // Gate 4: cancel route was interrupt, not delete.
-        assertEquals(listOf("p-1"), cancel.interruptCalls)
-        assertEquals(emptyList<String>(), cancel.deleteCalls)
+        assertEquals(listOf("p-1"), cancel.interruptPromptIds)
+        assertEquals(emptyList<String>(), cancel.deletePromptIds)
     }
 
     @Test fun requestCancel_in_Idle_does_not_open_confirm() = runTest {
@@ -258,6 +270,7 @@ class RunViewModelTest {
         val terminalDeferred = async(Dispatchers.Unconfined) { coordinator.run(
             com.comfymobile.domain.run.RunSubmission(
                 serverId = "127.0.0.1:8188",
+                baseUrl = "http://127.0.0.1:8188",
                 clientId = "test-client",
                 workflowUi = com.comfymobile.domain.workflow.WorkflowGraph.Ui(envelope().original as JsonObject),
             )
@@ -283,7 +296,16 @@ class RunViewModelTest {
         assertIs<RunUiState.Phase.Failed>(afterDismiss.phase)
     }
 
-    @Test fun terminal_sheet_resurfaces_after_prepare_clears_dismissed_flag() = runTest {
+    /**
+     * @Lily PR #31 second-round regression (msg `8bbd4fa1` blocker 2):
+     *
+     * Dismissing a Failed/Cancelled sheet then loading another workflow
+     * must NOT resurrect the dismissed sheet. The previous fix used a
+     * boolean reset on `prepare()` which had the wrong sign — dismissing
+     * the sheet then loading workflow B would bring back A's stale
+     * failure dialog. Keyed-by-promptId dismissal solves this.
+     */
+    @Test fun prepare_after_dismiss_does_NOT_resurrect_the_dismissed_terminal() = runTest {
         val ws = ChannelWs()
         val (vm, coordinator) = vm(ws = ws, scope = this)
         vm.prepare(PreparedWorkflow(envelope = envelope()))
@@ -291,6 +313,7 @@ class RunViewModelTest {
         val deferred = async(Dispatchers.Unconfined) { coordinator.run(
             com.comfymobile.domain.run.RunSubmission(
                 serverId = "127.0.0.1:8188",
+                baseUrl = "http://127.0.0.1:8188",
                 clientId = "test-client",
                 workflowUi = com.comfymobile.domain.workflow.WorkflowGraph.Ui(envelope().original as JsonObject),
             )
@@ -303,18 +326,22 @@ class RunViewModelTest {
         ))
         withTimeout(1_000) { deferred.await() }
 
+        // User sees the terminal sheet, dismisses it.
         vm.uiState.first { it.terminal != null }
         vm.dismissTerminal()
-        vm.uiState.first { it.terminal == null }
+        val afterDismiss = vm.uiState.first { it.terminal == null }
+        assertIs<RunUiState.Phase.Failed>(afterDismiss.phase)
 
-        // Preparing a new workflow resets the dismissed flag, so the
-        // existing terminal RunState surfaces again until cleared by
-        // a fresh successful submit. (Models the case where the user
-        // dismissed the sheet, navigated, loaded a new workflow, and
-        // the prior failure should be visible again until they retry.)
+        // User loads a different workflow. The prior dismissed terminal
+        // MUST NOT resurface — the dismissal is keyed to the prior
+        // run's promptId, so until a new submit creates a new run with
+        // a new promptId, the sheet stays hidden.
         vm.prepare(PreparedWorkflow(envelope = envelope(label = "another")))
-        val afterPrepare = vm.uiState.first { it.terminal != null }
-        assertIs<RunUiState.TerminalView.Failure>(afterPrepare.terminal)
+        val afterPrepare = vm.uiState.first { true }
+        assertNull(afterPrepare.terminal)
+        // Phase stays Failed (RunState.value didn't change), but the
+        // modal sheet stays dismissed.
+        assertIs<RunUiState.Phase.Failed>(afterPrepare.phase)
     }
 
     // ----------------------------------------------------------------- Lily blocker 4: API-only envelope CTA gate
@@ -353,6 +380,7 @@ class RunViewModelTest {
         val terminalDeferred = async(Dispatchers.Unconfined) { coordinator.run(
             com.comfymobile.domain.run.RunSubmission(
                 serverId = "127.0.0.1:8188",
+                baseUrl = "http://127.0.0.1:8188",
                 clientId = "test-client",
                 workflowUi = com.comfymobile.domain.workflow.WorkflowGraph.Ui(
                     (envelope().original as JsonObject),
@@ -366,8 +394,8 @@ class RunViewModelTest {
         vm.dismissCancel()
         // Sheet closes but no cancel API was invoked.
         vm.uiState.first { !it.cancelConfirmOpen }
-        assertEquals(emptyList<String>(), cancel.deleteCalls)
-        assertEquals(emptyList<String>(), cancel.interruptCalls)
+        assertEquals(emptyList<String>(), cancel.deletePromptIds)
+        assertEquals(emptyList<String>(), cancel.interruptPromptIds)
 
         // Drain so the test scope completes cleanly.
         ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1"))

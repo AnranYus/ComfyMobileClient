@@ -64,18 +64,27 @@ class RunViewModel(
     private val cancelConfirmOpen = MutableStateFlow(false)
 
     /**
-     * UI-only local state: when true, the surface suppresses the
-     * terminal Failed / Cancelled sheet even though the underlying
-     * `RunState` is still terminal. Resets to false whenever the user
-     * (re-)prepares a workflow or triggers a fresh submit — that
-     * transitions the run out of its terminal state anyway, but the
-     * reset is explicit so a stale "dismissed" flag doesn't outlive
-     * the sheet it was dismissed from.
+     * UI-only local state: the *key* of the terminal the user has
+     * dismissed. The mapper suppresses the terminal sheet only when
+     * the current run state's terminal key matches this value.
      *
-     * Per @Lily PR #31 review msg `18946cd9` blocker 1 — the previous
-     * `dismissTerminal()` was a no-op and the sheet couldn't close.
+     * Key derivation (see [terminalKey]):
+     *  - Failed / Cancelled with a promptId → the promptId.
+     *  - Failed with promptId = null (submission-time failure) → a
+     *    fixed sentinel so the dismissed flag still survives.
+     *  - Non-terminal states → null (no key to compare against).
+     *
+     * Reset semantics (per @Lily PR #31 second-round review msg
+     * `8bbd4fa1` blocker 2): the dismissal is keyed, not boolean. So
+     * `prepare()` does NOT touch this — a user who dismisses a Failed
+     * sheet then loads another workflow sees no stale resurrection,
+     * and a future failure with a DIFFERENT promptId surfaces fresh
+     * because keys won't match. `onSubmit()` clears the key explicitly
+     * to cover the corner case where the state moves through the
+     * brief Submitting phase before settling on a new terminal (the
+     * dismissed key is then meaningless).
      */
-    private val terminalDismissed = MutableStateFlow(false)
+    private val dismissedTerminalKey = MutableStateFlow<String?>(null)
 
     /**
      * Lookup table from numeric node id (as it appears in the UI graph)
@@ -93,7 +102,7 @@ class RunViewModel(
                 preparedWorkflow,
                 activeServer.current,
                 cancelConfirmOpen,
-                terminalDismissed,
+                dismissedTerminalKey,
             )
         ) { values ->
             @Suppress("UNCHECKED_CAST")
@@ -105,7 +114,13 @@ class RunViewModel(
             @Suppress("UNCHECKED_CAST")
             val server = values[3] as com.comfymobile.domain.server.ServerInfo?
             val confirm = values[4] as Boolean
-            val dismissed = values[5] as Boolean
+            @Suppress("UNCHECKED_CAST")
+            val dismissedKey = values[5] as String?
+            // Suppress only when the CURRENT terminal matches the
+            // dismissed key — so an old dismissed key doesn't hide a
+            // newer different-promptId terminal.
+            val terminalDismissed = run.terminalKey() != null
+                && run.terminalKey() == dismissedKey
             RunUiStateMapper.project(
                 runState = run,
                 connectionState = conn,
@@ -118,7 +133,7 @@ class RunViewModel(
                 workflowTitle = prepared?.label,
                 nodeDisplayNameByNodeId = { id -> nodeDisplayNames[id] },
                 language = language,
-                terminalDismissed = dismissed,
+                terminalDismissed = terminalDismissed,
             )
         }.stateIn(
             scope = scope,
@@ -145,11 +160,12 @@ class RunViewModel(
     fun prepare(prepared: PreparedWorkflow) {
         preparedWorkflow.value = prepared
         nodeDisplayNames = buildNodeDisplayNameIndex(prepared.envelope)
-        // Stale "dismissed" flag should not persist across a new
-        // workflow preparation — if the user dismissed the prior
-        // failure sheet and then loaded a different workflow, the new
-        // run's failure (if any) must surface fresh.
-        terminalDismissed.value = false
+        // Do NOT reset dismissedTerminalKey here (@Lily PR #31 second-
+        // round blocker 2): if the user dismissed a Failed("p-1") sheet
+        // and then loaded another workflow, the prior failure sheet
+        // must STAY hidden — the dismissed key is matched per-promptId
+        // so a future Failed("p-2") with a different key surfaces fresh
+        // on its own.
     }
 
     /**
@@ -167,11 +183,16 @@ class RunViewModel(
         if (!canSubmitNow(runState)) return
 
         val ui = prepared.envelope.ui ?: return
-        // Clear any leftover "terminal dismissed" flag from the prior
-        // run so the sheet surfaces fresh if this new run fails.
-        terminalDismissed.value = false
+        // Clear the dismissed-terminal key — a fresh submit moves us
+        // out of any prior terminal state into Submitting, so any old
+        // terminal sheet that was visually dismissed no longer matters.
+        dismissedTerminalKey.value = null
+        // Pin the run to THIS server's baseUrl. If the user switches
+        // active server mid-run, the run continues against the snapshot
+        // captured here — never gets redirected.
         val submission = RunSubmission(
             serverId = server.serverId,
+            baseUrl = server.baseUrl,
             clientId = clientId,
             workflowUi = ui,
             objectInfo = prepared.objectInfo,
@@ -207,20 +228,24 @@ class RunViewModel(
     }
 
     /**
-     * Hide the surfaced terminal sheet (Failed / Cancelled).
+     * Hide the surfaced terminal sheet for the CURRENT run terminal.
      *
      * The underlying [RunState] remains terminal — it only changes on
      * the next submit — but the surface stops rendering the modal
-     * sheet so the user can return to the workflow view. The flag
-     * resets on [prepare] or [onSubmit] so a future terminal surfaces
-     * fresh.
+     * sheet so the user can return to the workflow view. The dismissal
+     * is *keyed* to the specific terminal's promptId so:
+     *   - Loading another workflow after dismissal does NOT resurrect
+     *     this sheet (the key stays matched).
+     *   - A FUTURE run that terminates with a DIFFERENT promptId
+     *     surfaces fresh because the new terminal's key won't match.
      *
-     * Per @Lily PR #31 review msg `18946cd9` blocker 1: the prior
-     * implementation was a documentation-only no-op which meant the
-     * Close button on the sheet did nothing.
+     * Per @Lily PR #31 review msg `18946cd9` blocker 1 (sheet couldn't
+     * close at all) + msg `8bbd4fa1` blocker 2 (boolean reset on
+     * prepare resurrected the dismissed sheet — keyed by promptId now).
      */
     fun dismissTerminal() {
-        terminalDismissed.value = true
+        val key = coordinator.state.value.terminalKey() ?: return
+        dismissedTerminalKey.value = key
     }
 
     // ----------------------------------------------------------------- helpers
@@ -260,6 +285,29 @@ class RunViewModel(
         return out
     }
 }
+
+/**
+ * Stable identity for a terminal-state instance, used as the key for
+ * the "I dismissed THIS sheet" flag. Returns null for non-terminal
+ * states (the suppression check then never matches).
+ *
+ * Failed-at-submit (`promptId = null`) collapses to a single sentinel
+ * so the user can still dismiss it. A subsequent failed-at-submit
+ * shares the same key, so two back-to-back submit failures would only
+ * surface the sheet once — acceptable for now; the user can always
+ * navigate to retry.
+ */
+internal fun RunState.terminalKey(): String? = when (this) {
+    is RunState.Failed -> promptId ?: SUBMIT_FAIL_KEY
+    is RunState.Cancelled -> promptId
+    is RunState.Succeeded -> null // No dismissable sheet; the surface transitions away.
+    is RunState.Idle,
+    is RunState.Submitting,
+    is RunState.Queued,
+    is RunState.Running -> null
+}
+
+private const val SUBMIT_FAIL_KEY = "<submit-fail>"
 
 /**
  * Best-effort access to the UI form of a [WorkflowEnvelope].

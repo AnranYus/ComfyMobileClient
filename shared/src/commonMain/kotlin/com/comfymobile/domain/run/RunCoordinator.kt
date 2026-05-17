@@ -150,27 +150,28 @@ class RunCoordinator(
      * separation; null when the request was a no-op.
      */
     suspend fun requestCancel(): CancelRoute? {
-        return when (val current = _state.value) {
+        val current = _state.value
+        // The active cancel slot was set BEFORE state.value = Queued
+        // (see executeRun) and carries the run's bound baseUrl. We
+        // route every cancel via the slot's baseUrl so a mid-run
+        // active-server switch cannot redirect the call (@Lily PR #31
+        // blocker 1).
+        val slot = activeCancelChannel.value
+        return when (current) {
             is RunState.Running -> {
-                cancel.interruptRunning(current.promptId)
+                if (slot == null || slot.promptId != current.promptId) return null
+                cancel.interruptRunning(slot.baseUrl, current.promptId)
                 CancelRoute.InterruptRunning(current.promptId)
             }
             is RunState.Queued -> {
-                cancel.deleteQueued(current.promptId)
+                if (slot == null || slot.promptId != current.promptId) return null
+                cancel.deleteQueued(slot.baseUrl, current.promptId)
                 // Locally finalize since the server will not emit an
                 // execution_interrupted event for queue-deletes. The
                 // cancel channel was published before state = Queued so
                 // it is guaranteed visible by the time we get here (per
                 // @Lily PR #30 race fix, msg `42ee1862`).
-                val slot = activeCancelChannel.value
-                if (slot != null && slot.promptId == current.promptId) {
-                    // trySend never blocks: Channel.capacity = 1 means
-                    // the value sits in the buffer until the reducer's
-                    // cancel collector reads it. Subscription order is
-                    // irrelevant — that's why we use Channel, not
-                    // SharedFlow.
-                    slot.channel.trySend(Terminal.Cancelled(fromNodeId = null))
-                }
+                slot.channel.trySend(Terminal.Cancelled(fromNodeId = null))
                 CancelRoute.DeleteQueued(current.promptId)
             }
             else -> null
@@ -192,14 +193,15 @@ class RunCoordinator(
             return finalizeFailed(promptId = null, error = RunError.Network(t), persistJob = false)
         }
 
-        // 2. POST /prompt
+        // 2. POST /prompt — pinned to the submission's baseUrl for the
+        //    entire run lifecycle (cancel + WS will use the same one).
         val request = PromptRequestDto(
             prompt = apiGraph.toJsonElement(),
             client_id = submission.clientId,
             extra_data = submission.extraData,
         )
         val response = try {
-            prompt.submit(request)
+            prompt.submit(submission.baseUrl, request)
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
             return finalizeFailed(promptId = null, error = RunError.Network(t), persistJob = false)
@@ -221,6 +223,7 @@ class RunCoordinator(
         val cancelChannel = Channel<Terminal>(capacity = 1)
         activeCancelChannel.value = ActiveCancelChannel(
             promptId = response.prompt_id,
+            baseUrl = submission.baseUrl,
             channel = cancelChannel,
         )
 
@@ -248,10 +251,13 @@ class RunCoordinator(
                 queuePosition = response.number,
             )
 
-            // 5. Drive the WS state machine.
+            // 5. Drive the WS state machine. Bound to the submission's
+            //    baseUrl so the WS subscription doesn't get redirected
+            //    by an active-server switch mid-run.
             return try {
                 driveWsLifecycle(
                     promptId = response.prompt_id,
+                    baseUrl = submission.baseUrl,
                     clientId = submission.clientId,
                     serverId = submission.serverId,
                     cancelChannel = cancelChannel,
@@ -328,6 +334,7 @@ class RunCoordinator(
      */
     private suspend fun driveWsLifecycle(
         promptId: String,
+        baseUrl: String,
         clientId: String,
         serverId: String,
         cancelChannel: Channel<Terminal>,
@@ -336,7 +343,7 @@ class RunCoordinator(
 
         val wsJob = launch {
             try {
-                ws.events(clientId).collect { event ->
+                ws.events(baseUrl, clientId).collect { event ->
                     inputs.trySend(MachineInput.WsFrame(event))
                 }
                 // Flow completed without an error — server closed the socket.
@@ -470,7 +477,15 @@ class RunCoordinator(
 /**
  * The information [RunCoordinator.run] needs to launch one workflow.
  *
+ * **Server context is bound at submission** (per @Lily PR #31 review
+ * msg `8bbd4fa1` blocker 1): the run is pinned to [baseUrl] for its
+ * entire lifetime, including the cancel path. A mid-run change to the
+ * active server WILL NOT redirect WS subscription or cancel calls to a
+ * different server — those continue against [baseUrl].
+ *
  *  - [serverId]: the active server identifier for [JobRepository] rows.
+ *  - [baseUrl]: the server endpoint snapshot. Used by the run's ports
+ *    for the *entire* run lifecycle.
  *  - [clientId]: the WS client id; included in `PromptRequestDto.client_id`
  *    so the server stamps emitted events with the same id our WS reads.
  *  - [workflowUi]: the UI-form workflow snapshot (typically the user's
@@ -488,6 +503,7 @@ class RunCoordinator(
  */
 data class RunSubmission(
     val serverId: String,
+    val baseUrl: String,
     val clientId: String,
     val workflowUi: WorkflowGraph.Ui,
     val objectInfo: JsonElement? = null,
@@ -552,9 +568,15 @@ internal sealed interface MachineInput {
  * is checked by [RunCoordinator.requestCancel] before sending so a
  * cleanup race (channel cleared mid-cancel) cannot deliver a signal
  * meant for a prior run.
+ *
+ * [baseUrl] is captured here so [RunCoordinator.requestCancel] can
+ * route Running cancels to the same server the run was submitted on,
+ * even if the user has since switched the active server (per @Lily PR
+ * #31 review msg `8bbd4fa1` blocker 1).
  */
 internal data class ActiveCancelChannel(
     val promptId: String,
+    val baseUrl: String,
     val channel: Channel<Terminal>,
 )
 
