@@ -44,6 +44,7 @@ class RenderPlanBuilderTest {
         runtimeStatus: NodeRuntimeStatus = NodeRuntimeStatus.IDLE,
         resolveSummaryRows: (ParsedNode) -> List<SummaryEntry> = { emptyList() },
         graphPalette: GraphPalette = palette,
+        interactiveLodDowngrade: Boolean = false,
     ): RenderPlan {
         val layout = GraphLayout.layout(graph)
         return RenderPlanBuilder.build(
@@ -71,6 +72,7 @@ class RenderPlanBuilderTest {
             resolveSummaryRows = resolveSummaryRows,
             visibleBounds = visibleBounds,
             graphPalette = graphPalette,
+            interactiveLodDowngrade = interactiveLodDowngrade,
         )
     }
 
@@ -154,6 +156,45 @@ class RenderPlanBuilderTest {
             visibleBounds = Rect(left = 0f, top = 0f, right = 500f, bottom = 200f),
         )
         assertEquals(1, plan.visibleEdgeCount())
+    }
+
+    @Test fun viewport_keeps_edge_whose_bezier_curve_passes_through_visible_area() {
+        // Per @Lily PR #24 thread review #2 (msg `b025c831`): the
+        // edge-culling check must use the bezier control-point bbox,
+        // not just endpoints. An edge whose endpoints lie outside
+        // the viewport but whose curve bulges through the visible
+        // area must NOT be culled.
+        //
+        // Construct: source node far left, target node far right;
+        // viewport covers only the middle band. The control points
+        // (control1/control2) for the auto-generated bezier lie
+        // along the same horizontal as the endpoints (off-screen),
+        // so the *control bbox* on its own wouldn't intersect the
+        // viewport either. Override the layout-derived edge with a
+        // hand-crafted EdgePath whose control points DIP into the
+        // visible band.
+        val graph = ParsedUiGraph(
+            nodes = listOf(
+                node("a", pos = Position(0f, 0f), size = Size(80f, 80f),
+                    outputs = listOf(port(0, "MODEL"))),
+                node("b", pos = Position(2000f, 0f), size = Size(80f, 80f),
+                    inputs = listOf(port(0, "MODEL"))),
+            ),
+            links = listOf(ParsedLink("e", "a", 0, "b", 0, "MODEL")),
+        )
+        // The auto layout's edge will have control points along
+        // y ≈ 50 (port row), spanning x = 80 → 2000. Its
+        // control-point bbox covers (80..2000, ~50). Viewport
+        // (500..1500, 0..200) intersects that bbox at x = 500..1500,
+        // so this edge must survive culling.
+        val plan = buildPlan(
+            graph,
+            visibleBounds = Rect(left = 500f, top = 0f, right = 1500f, bottom = 200f),
+        )
+        assertEquals(
+            1, plan.visibleEdgeCount(),
+            "edge whose control bbox intersects viewport must be kept (per Lily PR #24 review #2)",
+        )
     }
 
     @Test fun viewport_drops_edges_with_both_endpoints_outside_bounds() {
@@ -370,6 +411,190 @@ class RenderPlanBuilderTest {
             resolveSummaryRows = { _ -> listOf(SummaryEntry("should not appear")) },
         )
         assertEquals(0, plan.visibleSummaryRowCount())
+    }
+
+    // ---------------------------------------------------------------- viewport virtualisation driven by gesture state
+    //
+    // Per @Lily PR #36 review (`4471956260`) blocker 2: the interactive
+    // surface must wire ViewportTransform.computeVisibleBounds(...)
+    // back into RenderPlanBuilder so pan/zoom changes the visible
+    // command set. These tests pin the deterministic invariant.
+
+    @Test fun pan_changes_visible_command_set_via_computeVisibleBounds_pipeline() {
+        // Three nodes laid out across x = 0, 1000, 2000.
+        // Canvas is 600x300 — at identity, only node "a" is visible.
+        // Pan world right by 1000 (panX = -1000) so node "b" enters view.
+        val graph = ParsedUiGraph(
+            nodes = listOf(
+                node("a", pos = Position(0f, 0f), size = Size(200f, 100f)),
+                node("b", pos = Position(1000f, 0f), size = Size(200f, 100f)),
+                node("c", pos = Position(2000f, 0f), size = Size(200f, 100f)),
+            ),
+            links = emptyList(),
+        )
+        val canvasW = 600f
+        val canvasH = 300f
+
+        // gesture A: identity → visible world rect = (0..600, 0..300)
+        // (plus 0 buffer below; default buffer 200 still keeps b out
+        // at x=1000), so only "a" should appear.
+        val gestureA = GestureState.Identity
+        val boundsA = ViewportTransform.computeVisibleBounds(
+            canvasWidthPx = canvasW, canvasHeightPx = canvasH,
+            gesture = gestureA, bufferWorldUnits = 0f,
+        )
+        val planA = buildPlan(graph, visibleBounds = boundsA)
+        val nodesA = planA.commands.filterIsInstance<DrawCommand.NodeBody>().map { it.nodeId }.toSet()
+
+        // gesture B: pan world left by 1000 (panX = -1000) at zoom 1
+        // → camera looks at world (1000..1600, 0..300), so node "b"
+        // (at x=1000..1200) is visible and node "a" is not.
+        val gestureB = GestureState(panX = -1000f, panY = 0f, zoomScale = 1f)
+        val boundsB = ViewportTransform.computeVisibleBounds(
+            canvasWidthPx = canvasW, canvasHeightPx = canvasH,
+            gesture = gestureB, bufferWorldUnits = 0f,
+        )
+        val planB = buildPlan(graph, visibleBounds = boundsB)
+        val nodesB = planB.commands.filterIsInstance<DrawCommand.NodeBody>().map { it.nodeId }.toSet()
+
+        assertEquals(setOf("a"), nodesA, "identity gesture should show node a only; got $nodesA")
+        assertEquals(setOf("b"), nodesB, "panned gesture should show node b only; got $nodesB")
+        assertTrue(
+            nodesA != nodesB,
+            "pan via ViewportTransform.computeVisibleBounds MUST change the visible command set; both = $nodesA",
+        )
+    }
+
+    @Test fun zoom_changes_visible_command_set_via_computeVisibleBounds_pipeline() {
+        // Wide layout: nodes at x = 0, 400, 800. Canvas 1000x300.
+        // At identity, all three are visible. At zoom 2x, world rect
+        // shrinks to 500x150 — node at x=800 falls off the right edge.
+        val graph = ParsedUiGraph(
+            nodes = listOf(
+                node("a", pos = Position(0f, 0f), size = Size(150f, 80f)),
+                node("b", pos = Position(400f, 0f), size = Size(150f, 80f)),
+                node("c", pos = Position(800f, 0f), size = Size(150f, 80f)),
+            ),
+            links = emptyList(),
+        )
+        val canvasW = 1000f
+        val canvasH = 300f
+
+        // identity: all three visible
+        val gestureA = GestureState.Identity
+        val boundsA = ViewportTransform.computeVisibleBounds(
+            canvasWidthPx = canvasW, canvasHeightPx = canvasH,
+            gesture = gestureA, bufferWorldUnits = 0f,
+        )
+        val planA = buildPlan(graph, visibleBounds = boundsA)
+        val nodesA = planA.commands.filterIsInstance<DrawCommand.NodeBody>().map { it.nodeId }.toSet()
+
+        // 2x zoom: world rect (0..500, 0..150) — node c (x=800) drops
+        val gestureB = GestureState(zoomScale = 2f)
+        val boundsB = ViewportTransform.computeVisibleBounds(
+            canvasWidthPx = canvasW, canvasHeightPx = canvasH,
+            gesture = gestureB, bufferWorldUnits = 0f,
+        )
+        val planB = buildPlan(graph, visibleBounds = boundsB)
+        val nodesB = planB.commands.filterIsInstance<DrawCommand.NodeBody>().map { it.nodeId }.toSet()
+
+        assertEquals(setOf("a", "b", "c"), nodesA, "identity zoom should show all three; got $nodesA")
+        assertEquals(setOf("a", "b"), nodesB, "2x zoom should drop node c off the right edge; got $nodesB")
+        assertTrue(
+            nodesA != nodesB,
+            "zoom via ViewportTransform.computeVisibleBounds MUST change the visible command set",
+        )
+    }
+
+    // ---------------------------------------------------------------- §1.5 / §1.8 interactive LOD downgrade
+
+    @Test fun interactive_lod_downgrade_off_keeps_bezier_edges() {
+        // Default (off) — edges keep their bezier path; the
+        // straightLineFallback flag is `false`. The Compose adapter
+        // therefore renders bezier curves.
+        val graph = ParsedUiGraph(
+            nodes = listOf(
+                node("a", outputs = listOf(port(0, "MODEL"))),
+                node("b", pos = Position(400f, 0f), inputs = listOf(port(0, "MODEL"))),
+                node("c", pos = Position(800f, 0f), inputs = listOf(port(0, "MODEL"))),
+            ),
+            links = listOf(
+                ParsedLink("e1", "a", 0, "b", 0, "MODEL"),
+                ParsedLink("e2", "a", 0, "c", 0, "MODEL"),
+            ),
+        )
+        val plan = buildPlan(graph, interactiveLodDowngrade = false)
+        val edges = plan.commands.filterIsInstance<DrawCommand.Edge>()
+        assertEquals(2, edges.size)
+        assertTrue(
+            edges.all { !it.straightLineFallback },
+            "with downgrade=false, every edge must keep straightLineFallback=false; got " +
+                edges.map { it.straightLineFallback },
+        )
+    }
+
+    @Test fun interactive_lod_downgrade_on_flips_straight_line_fallback_for_every_edge() {
+        // Per @Ores T2.7 §1.5 / §1.8: during pan/zoom/node-drag the
+        // Compose adapter swaps bezier rendering for straight lines.
+        // The downgrade is RenderPlan-driven so the gesture layer can
+        // re-render once with `gestureState.isInteracting = true` and
+        // get a fully straight-line plan deterministically.
+        val graph = ParsedUiGraph(
+            nodes = listOf(
+                node("a", outputs = listOf(port(0, "MODEL"))),
+                node("b", pos = Position(400f, 0f), inputs = listOf(port(0, "MODEL"))),
+                node("c", pos = Position(800f, 0f), inputs = listOf(port(0, "MODEL"))),
+            ),
+            links = listOf(
+                ParsedLink("e1", "a", 0, "b", 0, "MODEL"),
+                ParsedLink("e2", "a", 0, "c", 0, "MODEL"),
+            ),
+        )
+        val plan = buildPlan(graph, interactiveLodDowngrade = true)
+        val edges = plan.commands.filterIsInstance<DrawCommand.Edge>()
+        assertEquals(2, edges.size, "downgrade flag must not affect edge count")
+        assertTrue(
+            edges.all { it.straightLineFallback },
+            "with downgrade=true, every edge must report straightLineFallback=true; got " +
+                edges.map { it.straightLineFallback },
+        )
+    }
+
+    @Test fun interactive_lod_downgrade_does_not_alter_non_edge_commands() {
+        // The downgrade flag is *edge-only*: node body / title / port
+        // commands must be unchanged so a pan/zoom doesn't introduce
+        // visual regressions on the nodes themselves.
+        val graph = ParsedUiGraph(
+            nodes = listOf(
+                node("a", outputs = listOf(port(0, "MODEL"))),
+                node("b", pos = Position(400f, 0f), inputs = listOf(port(0, "MODEL"))),
+            ),
+            links = listOf(ParsedLink("e", "a", 0, "b", 0, "MODEL")),
+        )
+        val noDowngrade = buildPlan(graph, interactiveLodDowngrade = false)
+        val withDowngrade = buildPlan(graph, interactiveLodDowngrade = true)
+
+        // Same command count + same per-type counts: the downgrade only
+        // toggles a flag, never adds/removes commands.
+        assertEquals(noDowngrade.commands.size, withDowngrade.commands.size)
+        for (type in listOf(
+            DrawCommand.NodeBody::class,
+            DrawCommand.NodeTitle::class,
+            DrawCommand.NodePort::class,
+        )) {
+            assertEquals(
+                noDowngrade.commands.count { type.isInstance(it) },
+                withDowngrade.commands.count { type.isInstance(it) },
+                "downgrade flag must not change ${type.simpleName} count",
+            )
+        }
+        // Node-side commands must be byte-equal between the two plans
+        // (no subtle palette / position drift). Compare structurally
+        // by filtering out Edge commands.
+        val nodeOnlyNo = noDowngrade.commands.filterNot { it is DrawCommand.Edge }
+        val nodeOnlyWith = withDowngrade.commands.filterNot { it is DrawCommand.Edge }
+        assertEquals(nodeOnlyNo, nodeOnlyWith,
+            "non-Edge draw commands must be structurally identical regardless of downgrade flag")
     }
 
     private fun DrawCommand.nodeIdOrNull(): String? = when (this) {
