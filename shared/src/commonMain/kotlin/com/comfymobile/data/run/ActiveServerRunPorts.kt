@@ -55,3 +55,19 @@ class WebSocketSourceWsEventPort(
     override fun events(baseUrl: String, clientId: String): Flow<WsEvent> =
         webSocketSourceFactory(baseUrl).connect(clientId)
 }
+
+/**
+ * Production [HistoryProbePort] backed by [ComfyHttpClient.getHistoryEntry].
+ * Stateless; the per-server `httpClientFactory` resolves a fresh client
+ * per call so probes target whatever baseUrl the caller passes.
+ */
+class HttpClientHistoryProbePort(
+    private val httpClientFactory: (baseUrl: String) -> ComfyHttpClient,
+) : HistoryProbePort {
+
+    override suspend fun getHistoryEntry(
+        baseUrl: String,
+        promptId: String,
+    ): com.comfymobile.data.network.dto.HistoryEntryDto? =
+        httpClientFactory(baseUrl).getHistoryEntry(promptId)
+}

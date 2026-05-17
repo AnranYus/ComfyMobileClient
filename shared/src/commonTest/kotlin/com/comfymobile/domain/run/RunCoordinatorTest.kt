@@ -167,6 +167,10 @@ class RunCoordinatorTest {
         ws: WsEventPort = ChannelWs(),
         jobs: InMemoryJobRepository = InMemoryJobRepository(),
         clock: Clock = FixedClock(),
+        // Tests default to a tight grace window so the timer fires
+        // within the runTest virtual-time budget. Production default
+        // is 60s.
+        reconciliationGraceMs: Long = 50,
     ): Pair<RunCoordinator, InMemoryJobRepository> = RunCoordinator(
         prompt = prompt,
         cancel = cancel,
@@ -174,6 +178,7 @@ class RunCoordinatorTest {
         converter = WorkflowConverter(),
         jobs = jobs,
         clock = clock,
+        reconciliationGraceMs = reconciliationGraceMs,
     ) to jobs
 
     private fun submission(
@@ -480,20 +485,26 @@ class RunCoordinatorTest {
 
     // ----------------------------------------------------------------- WS closes without terminal
 
-    @Test fun ws_closes_before_terminal_event_terminates_Failed_Network() = runTest {
-        val ws = ChannelWs()
-        val jobs = InMemoryJobRepository()
-        val (c, _) = coord(ws = ws, jobs = jobs)
+    @Test fun ws_closes_before_terminal_event_terminates_Failed_Network() = kotlinx.coroutines.test.runTest {
+        // This test exercises the grace-timer path (WS close → no
+        // reconciliation → synthetic Failed(Network)). Uses real time
+        // because the grace timer's `delay()` falls back to wall
+        // clock under Dispatchers.Unconfined.
+        kotlinx.coroutines.runBlocking {
+            val ws = ChannelWs()
+            val jobs = InMemoryJobRepository()
+            val (c, _) = coord(ws = ws, jobs = jobs, reconciliationGraceMs = 80)
 
-        val deferred = async(Dispatchers.Unconfined) { c.run(submission()) }
-        c.state.first { it is RunState.Queued }
-        // Close WS without any terminal.
-        ws.close()
+            val deferred = async(Dispatchers.Unconfined) { c.run(submission()) }
+            c.state.first { it is RunState.Queued }
+            // Close WS without any terminal.
+            ws.close()
 
-        val terminal = withTimeout(1_000) { deferred.await() }
-        val failed = assertIs<RunState.Failed>(terminal)
-        assertIs<RunError.Network>(failed.error)
-        assertEquals(JobStatus.FAILED, jobs.getByPromptId("p-1")!!.status)
+            val terminal = withTimeout(2_000) { deferred.await() }
+            val failed = assertIs<RunState.Failed>(terminal)
+            assertIs<RunError.Network>(failed.error)
+            assertEquals(JobStatus.FAILED, jobs.getByPromptId("p-1")!!.status)
+        }
     }
 
     // ----------------------------------------------------------------- concurrent run
@@ -706,6 +717,155 @@ class RunCoordinatorTest {
         assertEquals(listOf(baseUrlA to "p-1"), cancel.deleteCalls)
         assertEquals(emptyList<Pair<String, String>>(), cancel.interruptCalls)
 
+        withTimeout(1_000) { deferred.await() }
+    }
+
+    // ----------------------------------------------------------------- T2.3 follow-up 2: reconciliation
+
+    /**
+     * @Lily PR #34 review msg `4996df44` blocker 1 regression: when WS
+     * closes mid-run without a terminal event, the coordinator MUST
+     * stay alive long enough for the B/C `/history` reconciler to
+     * deliver a Reconciled terminal. Previously the coordinator
+     * finalized immediately as Failed(Network), beating any
+     * reconciliation that was on its way.
+     */
+    @Test fun ws_loss_then_reconciled_Succeeded_finalizes_as_Succeeded() = kotlinx.coroutines.test.runTest {
+        kotlinx.coroutines.runBlocking {
+            val ws = ChannelWs()
+            val jobs = InMemoryJobRepository()
+            // Long grace so the reconciliation wins the race, not the
+            // grace timer.
+            val (c, _) = coord(ws = ws, jobs = jobs, reconciliationGraceMs = 10_000)
+
+            val deferred = async(Dispatchers.Unconfined) { c.run(submission()) }
+            c.state.first { it is RunState.Queued }
+            ws.send(WsEvent.ExecutionStart(promptId = "p-1"))
+            ws.send(WsEvent.Executing(promptId = "p-1", node = "n-2"))
+            c.state.first { it is RunState.Running }
+
+            // Simulate WS drop mid-run.
+            ws.close()
+            // Coordinator must NOT have finalized yet — give it a moment.
+            kotlinx.coroutines.delay(30)
+            assertIs<RunState.Running>(c.state.value)
+
+            // Reconciler probes /history and delivers a Succeeded.
+            val applied = c.applyReconciledTerminal(
+                promptId = "p-1",
+                outcome = ReconciledOutcome.Succeeded(
+                    outputs = listOf(JobOutputRef("reconciled.png", "", "output"))
+                ),
+            )
+            assertTrue(applied, "reconciliation should have been accepted while in-flight")
+
+            val terminal = withTimeout(2_000) { deferred.await() }
+            val succeeded = assertIs<RunState.Succeeded>(terminal)
+            assertEquals(1, succeeded.outputs.size)
+            assertEquals("reconciled.png", succeeded.outputs[0].filename)
+            // Persistence is the coordinator's responsibility.
+            val persisted = jobs.getByPromptId("p-1")!!
+            assertEquals(JobStatus.SUCCEEDED, persisted.status)
+            assertEquals(JobOutputRef("reconciled.png", "", "output"), persisted.firstOutput)
+        }
+    }
+
+    /**
+     * The grace timer must terminate the run when no reconciliation
+     * arrives within the window. Otherwise the coordinator would hang
+     * forever after a WS drop.
+     */
+    @Test fun ws_loss_then_no_reconciliation_within_grace_finalizes_as_Failed_Network() = kotlinx.coroutines.test.runTest {
+        kotlinx.coroutines.runBlocking {
+            val ws = ChannelWs()
+            val jobs = InMemoryJobRepository()
+            val coordinator = RunCoordinator(
+                prompt = RecordingPrompt(),
+                cancel = RecordingCancel(),
+                ws = ws,
+                converter = WorkflowConverter(),
+                jobs = jobs,
+                clock = FixedClock(),
+                reconciliationGraceMs = 80, // short real-time wait
+            )
+
+            val deferred = async(Dispatchers.Unconfined) { coordinator.run(submission()) }
+            coordinator.state.first { it is RunState.Queued }
+            ws.send(WsEvent.ExecutionStart(promptId = "p-1"))
+            coordinator.state.first { it is RunState.Running }
+
+            // WS drops with no reconciliation.
+            ws.close()
+
+            // After the grace window the coordinator synthesises a
+            // Failed(Network) terminal.
+            val terminal = withTimeout(2_000) { deferred.await() }
+            val failed = assertIs<RunState.Failed>(terminal)
+            assertIs<RunError.Network>(failed.error)
+            assertEquals(JobStatus.FAILED, jobs.getByPromptId("p-1")!!.status)
+        }
+    }
+
+    /**
+     * @Lily PR #34 review msg `4996df44` blocker 2: if a real WS
+     * terminal landed first, an out-of-band reconciliation MUST NOT
+     * override it (terminal authority).
+     */
+    @Test fun reconciliation_after_real_WS_terminal_is_a_no_op() = runTest {
+        val ws = ChannelWs()
+        val jobs = InMemoryJobRepository()
+        val (c, _) = coord(ws = ws, jobs = jobs)
+
+        val deferred = async(Dispatchers.Unconfined) { c.run(submission()) }
+        c.state.first { it is RunState.Queued }
+        ws.send(WsEvent.ExecutionStart(promptId = "p-1"))
+        ws.send(WsEvent.ExecutionError(
+            promptId = "p-1",
+            nodeId = "n-3",
+            nodeType = "KSampler",
+            executed = emptyList(),
+            exceptionMessage = "real failure",
+            exceptionType = "RuntimeError",
+        ))
+        val terminal = withTimeout(1_000) { deferred.await() }
+        assertIs<RunState.Failed>(terminal)
+        // Job row is FAILED via real WS terminal.
+        assertEquals(JobStatus.FAILED, jobs.getByPromptId("p-1")!!.status)
+
+        // Out-of-band reconciliation arrives late claiming Succeeded.
+        // applyReconciledTerminal returns false because activeRunContext
+        // is null (the run has wound up) AND even if it tried, the
+        // snapshot.terminal-already-set guard would suppress.
+        val late = c.applyReconciledTerminal(
+            promptId = "p-1",
+            outcome = ReconciledOutcome.Succeeded(
+                outputs = listOf(JobOutputRef("late.png", "", "output"))
+            ),
+        )
+        assertEquals(false, late)
+        // Persisted state stays as the real WS terminal — FAILED, not
+        // overridden to SUCCEEDED.
+        assertEquals(JobStatus.FAILED, jobs.getByPromptId("p-1")!!.status)
+    }
+
+    @Test fun reconciliation_for_other_promptId_is_a_no_op() = runTest {
+        val ws = ChannelWs()
+        val (c, _) = coord(ws = ws)
+
+        val deferred = async(Dispatchers.Unconfined) { c.run(submission()) }
+        c.state.first { it is RunState.Queued }
+
+        val applied = c.applyReconciledTerminal(
+            promptId = "p-other",
+            outcome = ReconciledOutcome.Succeeded(outputs = emptyList()),
+        )
+        assertEquals(false, applied)
+
+        // The active run is still untouched.
+        assertIs<RunState.Queued>(c.state.value)
+
+        // Drain.
+        ws.send(WsEvent.ExecutionInterrupted(promptId = "p-1"))
         withTimeout(1_000) { deferred.await() }
     }
 }
