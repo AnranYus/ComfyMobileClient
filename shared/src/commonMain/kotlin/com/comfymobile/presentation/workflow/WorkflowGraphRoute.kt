@@ -1,0 +1,347 @@
+package com.comfymobile.presentation.workflow
+
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExtendedFloatingActionButton
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import com.comfymobile.data.descriptor.NodeDescriptorRegistry
+import com.comfymobile.presentation.graph.GraphPalette
+import com.comfymobile.presentation.graph.InteractiveGraphCanvas
+import com.comfymobile.presentation.graph.LayoutResult
+import com.comfymobile.presentation.graph.NodeRuntimeStatus
+import com.comfymobile.presentation.graph.NodeStyleResolver
+import com.comfymobile.presentation.graph.NodeTitleSpec
+import com.comfymobile.presentation.graph.RenderPlan
+import com.comfymobile.presentation.graph.RenderPlanBuilder
+import com.comfymobile.presentation.graph.SummaryRowResolver
+import com.comfymobile.presentation.graph.rememberGraphPalette
+import com.comfymobile.presentation.graph.rememberSummaryRowPalette
+import com.comfymobile.presentation.parameditor.ParamEditorOverlay
+import com.comfymobile.presentation.parameditor.ParamEditorViewModel
+
+/**
+ * Phase 2 close-out route per @Ores T2.7 §1.10.
+ *
+ * Hosts an interactive workflow graph view that ties together three
+ * previously-shipped-but-disconnected feature areas:
+ *
+ *  - T2.1b's [InteractiveGraphCanvas] (gesture-aware canvas)
+ *  - T2.2's [ParamEditorViewModel] / [ParamEditorOverlay] (param drawer)
+ *  - T2.6's `WorkflowRepository` + `WorkflowLibraryRoute` (library entry)
+ *
+ * Surface layers (top → bottom):
+ *  - top app bar: back arrow + workflow display name
+ *  - main canvas: `InteractiveGraphCanvas` bound to the loaded envelope
+ *  - bottom-right Run FAB: enabled when connected + envelope submittable
+ *  - param drawer overlay: T2.2's [ParamEditorOverlay] in front of the
+ *    canvas when a node is opened
+ *  - first-frame onboarding tooltip: one-shot per session
+ *
+ * **What this route does NOT do** (intentional, per Priestess scope):
+ *  - Wire itself into [com.comfymobile.App]'s nav. That happens as a
+ *    follow-up after Andy's T2.6 PR #39 merges (avoids a three-way
+ *    diff). Library tap-row → this route is the LibraryRoute caller's
+ *    job (`onTapRow` callback contract).
+ *  - Mutate the import overlay's existing Run FAB. Spec calls for the
+ *    Run FAB to migrate from import overlay to this route, but that's
+ *    an `App.kt` diff handled by the same follow-up.
+ *
+ * @param viewModel page-scoped [WorkflowGraphViewModel] — the caller
+ *   is responsible for resolving it from Koin with the page scope so
+ *   that leaving the route cancels the load coroutine. Same lifetime
+ *   contract Andy + Lily settled for [ParamEditorViewModel] in PR #25.
+ * @param paramEditorViewModel page-scoped [ParamEditorViewModel] — same
+ *   lifetime contract. The route forwards long-press / tap-on-selected
+ *   events into [ParamEditorViewModel.open] via [LaunchedEffect] on
+ *   the VM's pending-event fields.
+ * @param onBack invoked when the user taps the back arrow. The caller
+ *   decides where to go (typically `LibraryRoute`).
+ * @param onRun invoked when the user taps the Run FAB. Receives the
+ *   current envelope (which may differ from the originally-loaded row
+ *   if ParamEditor has applied changes since). Caller navigates to
+ *   [com.comfymobile.presentation.run.RunRoute] with this envelope.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun WorkflowGraphRoute(
+    viewModel: WorkflowGraphViewModel,
+    paramEditorViewModel: ParamEditorViewModel,
+    onBack: () -> Unit,
+    onRun: (com.comfymobile.domain.workflow.WorkflowEnvelope) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val state by viewModel.state.collectAsState()
+    val paramState by paramEditorViewModel.state.collectAsState()
+    val paramActions = remember(paramEditorViewModel) { paramEditorViewModel.actions() }
+
+    // Long-press from canvas → open ParamEditor for that node. The VM
+    // wraps the hit in a `PendingNodeEvent(seq)` so two presses on the
+    // same node still trigger two opens (LaunchedEffect keys on the
+    // whole value, not just nodeId).
+    LaunchedEffect(state.pendingLongPress) {
+        val event = state.pendingLongPress ?: return@LaunchedEffect
+        val envelope = state.envelope ?: return@LaunchedEffect
+        paramEditorViewModel.open(envelope, event.nodeId)
+        viewModel.onConsumePendingLongPress()
+    }
+
+    // Tap on already-selected node → re-open ParamEditor (per
+    // §2.1 second trigger). Same one-shot consumption pattern.
+    LaunchedEffect(state.pendingTapReopen) {
+        val event = state.pendingTapReopen ?: return@LaunchedEffect
+        val envelope = state.envelope ?: return@LaunchedEffect
+        paramEditorViewModel.open(envelope, event.nodeId)
+        viewModel.onConsumePendingTapReopen()
+    }
+
+    // When ParamEditor applies, push the new envelope back into our
+    // VM so the canvas re-renders against the latest state.
+    LaunchedEffect(paramState.lastAppliedEnvelope) {
+        val applied = paramState.lastAppliedEnvelope ?: return@LaunchedEffect
+        viewModel.onEnvelopeApplied(applied)
+        paramActions.onConsumeApplied()
+    }
+
+    // Theme-derived palettes — must be resolved INSIDE the Composable
+    // tree so light / dark / dynamic colour switches reach the
+    // renderer. Per @Lily PR #40 review (`dd3d183d`) blocker 2:
+    // hardcoding `GraphPalette.defaultLightForTesting` bypasses the
+    // theme and breaks dark mode / dynamic colour.
+    val graphPalette = rememberGraphPalette()
+    val summaryRowPalette = rememberSummaryRowPalette()
+
+    Scaffold(
+        modifier = modifier.fillMaxSize(),
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        text = state.displayName.ifBlank {
+                            WorkflowGraphCopy.loading.resolve(state.language)
+                        },
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        // Glyph back-arrow until the cross-platform
+                        // icon pack is wired (see `InteractiveGraphCanvas`
+                        // overlay for the same approach with `⟳`).
+                        Text(
+                            text = "←",
+                            style = MaterialTheme.typography.titleLarge,
+                        )
+                    }
+                },
+            )
+        },
+        floatingActionButton = {
+            if (state.canRun) {
+                ExtendedFloatingActionButton(
+                    onClick = {
+                        val envelope = state.envelope ?: return@ExtendedFloatingActionButton
+                        onRun(envelope)
+                    },
+                ) {
+                    Text(WorkflowGraphCopy.run.resolve(state.language))
+                }
+            }
+        },
+    ) { innerPadding ->
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding),
+        ) {
+            WorkflowGraphContent(
+                state = state,
+                viewModel = viewModel,
+                registry = viewModel.registry,
+                graphPalette = graphPalette,
+                summaryRowPalette = summaryRowPalette,
+            )
+            // T2.2 drawer overlay — sheet at bottom + error AlertDialog
+            // routing. Z-order: drawn AFTER the canvas so the drawer
+            // covers it as expected.
+            ParamEditorOverlay(
+                state = paramState,
+                actions = paramActions,
+            )
+            // First-frame onboarding hint per §1.9. AlertDialog so the
+            // user has to dismiss before continuing; one-shot per VM
+            // load() call (clears `firstFrameHintVisible`).
+            if (state.firstFrameHintVisible && state.parsedGraph != null) {
+                AlertDialog(
+                    onDismissRequest = viewModel::onDismissFirstFrameHint,
+                    title = null,
+                    text = { Text(WorkflowGraphCopy.firstFrameHint.resolve(state.language)) },
+                    confirmButton = {
+                        TextButton(onClick = viewModel::onDismissFirstFrameHint) {
+                            Text(WorkflowGraphCopy.gotIt.resolve(state.language))
+                        }
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkflowGraphContent(
+    state: WorkflowGraphScreenState,
+    viewModel: WorkflowGraphViewModel,
+    registry: NodeDescriptorRegistry,
+    graphPalette: GraphPalette,
+    summaryRowPalette: com.comfymobile.presentation.graph.SummaryRowPalette,
+) {
+    when {
+        state.isLoading -> {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+        }
+        state.errorMessage != null && state.parsedGraph == null -> {
+            Surface(modifier = Modifier.fillMaxSize()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(24.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = state.errorMessage.resolve(state.language),
+                        style = MaterialTheme.typography.bodyLarge,
+                    )
+                }
+            }
+        }
+        state.parsedGraph != null && state.layoutResult != null -> {
+            val layout: LayoutResult = state.layoutResult
+            InteractiveGraphCanvas(
+                layoutResult = layout,
+                gestureState = state.gestureState,
+                onIntent = viewModel::onIntent,
+                buildPlan = { visibleBounds ->
+                    buildPlan(
+                        state = state,
+                        registry = registry,
+                        graphPalette = graphPalette,
+                        summaryRowPalette = summaryRowPalette,
+                        visibleBounds = visibleBounds,
+                    )
+                },
+            )
+            Spacer(modifier = Modifier.fillMaxWidth())
+        }
+        else -> {
+            // Defensive fallback: not loading, no error, no parsed
+            // graph. Shouldn't occur in normal flows; render an empty
+            // surface so the user isn't stuck on a blank box.
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    text = WorkflowGraphCopy.loading.resolve(state.language),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Build a [RenderPlan] for the current state, scoped to [visibleBounds]
+ * derived inside the canvas by [InteractiveGraphCanvas] (per @Lily PR
+ * #36 viewport-virtualisation contract).
+ *
+ * Per @Lily PR #40 review (`dd3d183d`) blockers 1 & 2 the production
+ * path MUST:
+ *  - pass `descriptor = registry.lookup(node.classType)` so whitelist
+ *    nodes get FULL body mode with their port pins and summary rows
+ *    (passing `null` collapses every node to TITLE_ONLY).
+ *  - feed the theme-derived [graphPalette] / [summaryRowPalette] (via
+ *    `rememberGraphPalette()` / `rememberSummaryRowPalette()`) so
+ *    light / dark / dynamic theme switches reach the renderer.
+ *
+ * Runtime status is `IDLE` here: the route doesn't observe runs (when
+ * a run starts, the user navigates to [com.comfymobile.presentation.run.RunRoute]
+ * which owns the status projection). Status annotation in the graph
+ * during running is a Phase-3 enhancement.
+ */
+private fun buildPlan(
+    state: WorkflowGraphScreenState,
+    registry: NodeDescriptorRegistry,
+    graphPalette: GraphPalette,
+    summaryRowPalette: com.comfymobile.presentation.graph.SummaryRowPalette,
+    visibleBounds: com.comfymobile.presentation.graph.Rect?,
+): RenderPlan {
+    val parsed = state.parsedGraph ?: return RenderPlan(emptyList())
+    val layout = state.layoutResult ?: return RenderPlan(emptyList())
+    return RenderPlanBuilder.build(
+        graph = parsed,
+        layoutResult = layout,
+        resolveStyle = { node ->
+            NodeStyleResolver.resolve(
+                node = node,
+                descriptor = registry.lookup(node.classType),
+                runtimeStatus = NodeRuntimeStatus.IDLE,
+                palette = graphPalette,
+                isSelected = node.id == state.selectedNodeId,
+            )
+        },
+        resolvePortStyle = { port -> NodeStyleResolver.resolvePort(port, graphPalette) },
+        resolveTitle = { node ->
+            // Per @Lily PR #40 review (`c41778c1`): production title
+            // contract matches T2.1a — user-overridden `title` wins,
+            // otherwise the descriptor's localised `displayName` ("K
+            // 采样器" / "K Sampler"), only falling back to the raw
+            // classType when the node isn't on the whitelist (which
+            // also triggers italic per §1.1).
+            val descriptor = registry.lookup(node.classType)
+            val title = node.title
+                ?: descriptor?.displayName?.resolve(state.language)
+                ?: node.classType
+            NodeTitleSpec(text = title, italic = descriptor == null)
+        },
+        resolveSummaryRows = { node ->
+            SummaryRowResolver.resolve(node, registry.lookup(node.classType))
+        },
+        visibleBounds = visibleBounds,
+        graphPalette = graphPalette,
+        summaryRowPalette = summaryRowPalette,
+        interactiveLodDowngrade = state.gestureState.isInteracting,
+    )
+}
+
+/**
+ * Local [com.comfymobile.domain.node.LocalizedString] resolver. The
+ * domain type ships with `zh: String` + `en: String?` (en falls back
+ * to zh when missing). Mirrors the private resolvers in
+ * `ParamEditorCore` and `ParamEditorDrawer` — kept local to avoid
+ * leaking a third API surface for the same trivial mapping.
+ */
+private fun com.comfymobile.domain.node.LocalizedString.resolve(
+    language: com.comfymobile.presentation.connection.ConnectionLanguage,
+): String = when (language) {
+    com.comfymobile.presentation.connection.ConnectionLanguage.Zh -> zh
+    com.comfymobile.presentation.connection.ConnectionLanguage.En -> en ?: zh
+}
