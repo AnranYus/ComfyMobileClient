@@ -185,10 +185,12 @@ class RunCoordinatorTest {
         serverId: String = "srv-1",
         baseUrl: String = "http://srv-1.local:8188",
         promptId: String = "client-1",
+        workflowId: String? = "wf-1",
     ) = RunSubmission(
         serverId = serverId,
         baseUrl = baseUrl,
         clientId = promptId,
+        workflowId = workflowId,
         workflowUi = minimalUi(),
         workflowSnapshotJson = "{\"raw\":\"snapshot\"}",
         label = "test-run",
@@ -239,6 +241,7 @@ class RunCoordinatorTest {
 
         val persisted = jobs.getByPromptId("p-1")!!
         assertEquals(JobStatus.SUCCEEDED, persisted.status)
+        assertEquals("wf-1", persisted.workflowId)
         assertEquals(JobOutputRef("out.png", "", "output"), persisted.firstOutput)
     }
 

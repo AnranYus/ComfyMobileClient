@@ -43,6 +43,7 @@ class SqlDelightJobRepository(
         queries.upsertJob(
             prompt_id = job.promptId,
             server_id = job.serverId,
+            workflow_id = job.workflowId,
             status = job.status.wireValue,
             workflow_snapshot_json = job.workflowSnapshotJson,
             api_prompt_json = job.apiPromptJson,
@@ -118,6 +119,12 @@ class SqlDelightJobRepository(
             .map { rows -> rows.map({ row -> row.toDomain() }) }
             .flowOn(ioDispatcher)
 
+    override fun observeSucceededWithFirstOutputByServer(serverId: String): Flow<List<Job>> =
+        queries.selectSucceededWithFirstOutputByServer(serverId, ::toDomain)
+            .asFlow()
+            .mapToList(ioDispatcher)
+            .flowOn(ioDispatcher)
+
     override suspend fun listInFlight(serverId: String): List<Job> = withContext(ioDispatcher) {
         queries.selectInflight(serverId).executeAsList().map({ row -> row.toDomain() })
     }
@@ -137,6 +144,7 @@ class SqlDelightJobRepository(
     private fun JobIndex.toDomain(): Job = Job(
         promptId = prompt_id,
         serverId = server_id,
+        workflowId = workflow_id,
         status = JobStatus.fromWire(status),
         workflowSnapshotJson = workflow_snapshot_json,
         apiPromptJson = api_prompt_json,
@@ -151,6 +159,38 @@ class SqlDelightJobRepository(
         isFavorite = is_favorite != 0L,
         createdAtEpochMs = created_at,
         finishedAtEpochMs = finished_at,
+    )
+
+    private fun toDomain(
+        promptId: String,
+        serverId: String,
+        workflowId: String?,
+        status: String,
+        workflowSnapshotJson: String?,
+        apiPromptJson: String?,
+        label: String?,
+        firstOutputFilename: String,
+        firstOutputSubfolder: String?,
+        firstOutputType: String?,
+        isFavorite: Long,
+        createdAt: Long,
+        finishedAt: Long?,
+    ): Job = Job(
+        promptId = promptId,
+        serverId = serverId,
+        workflowId = workflowId,
+        status = JobStatus.fromWire(status),
+        workflowSnapshotJson = workflowSnapshotJson,
+        apiPromptJson = apiPromptJson,
+        label = label,
+        firstOutput = JobOutputRef(
+            filename = firstOutputFilename,
+            subfolder = firstOutputSubfolder.orEmpty(),
+            type = firstOutputType ?: JobOutputRef.TYPE_OUTPUT,
+        ),
+        isFavorite = isFavorite != 0L,
+        createdAtEpochMs = createdAt,
+        finishedAtEpochMs = finishedAt,
     )
 
     private fun Boolean.asSqlLong(): Long = if (this) 1L else 0L

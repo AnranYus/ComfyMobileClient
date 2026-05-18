@@ -15,7 +15,7 @@ import com.comfymobile.domain.workflow.WorkflowEnvelope
  *
  *   Connect ──(active server)──→ LibraryRoute (always-on background)
  *   Library ──(tap row)────────→ Graph(workflowId)
- *   Graph   ──(Run FAB)────────→ Running(envelope)
+ *   Graph   ──(Run FAB)────────→ Running(workflowId, envelope)
  *   Graph   ──(back arrow)─────→ Idle (Library back-of-stack)
  *   Running ──(RunState.Succeeded)──→ Gallery(promptId, outputs)
  *   Running ──(user dismisses terminal)──→ Idle
@@ -56,7 +56,10 @@ internal sealed interface AppScreen {
      * Run flow active for [envelope]. RunRoute hosts the lifecycle;
      * coordinator owns the IO.
      */
-    data class Running(val envelope: WorkflowEnvelope) : AppScreen
+    data class Running(
+        val workflowId: String?,
+        val envelope: WorkflowEnvelope,
+    ) : AppScreen
 
     /**
      * Output gallery showing the outputs of a just-completed run.

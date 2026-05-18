@@ -49,7 +49,7 @@ class AppNavTest {
         // cancel the in-flight run per @Lily T2.3 gate 3).
         assertFalse(
             shouldPopGraphAfterDelete(
-                screen = AppScreen.Running(envelope()),
+                screen = AppScreen.Running(workflowId = "wf-1", envelope = envelope()),
                 deletedWorkflowId = "wf-1",
             )
         )

@@ -1,0 +1,4 @@
+ALTER TABLE jobIndex ADD COLUMN workflow_id TEXT;
+
+CREATE INDEX jobIndex_byServer_byWorkflow_byFinished
+    ON jobIndex(server_id, workflow_id, finished_at DESC, created_at DESC);

@@ -33,13 +33,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import coil3.ImageLoader
+import coil3.compose.AsyncImage
 import com.comfymobile.domain.workflow.WorkflowRow
 import com.comfymobile.presentation.connection.ConnectionLanguage
 import com.comfymobile.presentation.connection.ConnectionStatusTone
+import org.koin.compose.getKoin
 import org.jetbrains.compose.ui.tooling.preview.Preview
 
 @Composable
@@ -51,12 +56,15 @@ fun WorkflowLibraryRoute(
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsState()
+    val koin = getKoin()
+    val imageLoader = remember(koin) { koin.get<ImageLoader>() }
     LaunchedEffect(viewModel) {
         viewModel.openEvents.collect { onWorkflowOpened(it) }
     }
     WorkflowLibraryScreen(
         state = state,
         actions = viewModel.actions(onImport = onImport).withDeleteCallback(onWorkflowDeleted),
+        imageLoader = imageLoader,
         modifier = modifier,
     )
 }
@@ -65,6 +73,7 @@ fun WorkflowLibraryRoute(
 fun WorkflowLibraryScreen(
     state: WorkflowLibraryScreenState,
     actions: WorkflowLibraryActions,
+    imageLoader: ImageLoader? = null,
     modifier: Modifier = Modifier,
 ) {
     Box(modifier = modifier.fillMaxSize()) {
@@ -90,6 +99,7 @@ fun WorkflowLibraryScreen(
                             row = row,
                             language = state.language,
                             actions = actions,
+                            imageLoader = imageLoader,
                         )
                     }
                 }
@@ -165,6 +175,7 @@ private fun WorkflowLibraryRow(
     row: WorkflowLibraryRowState,
     language: ConnectionLanguage,
     actions: WorkflowLibraryActions,
+    imageLoader: ImageLoader?,
 ) {
     var menuExpanded by remember(row.workflowId) { mutableStateOf(false) }
     Surface(
@@ -191,18 +202,10 @@ private fun WorkflowLibraryRow(
                     color = MaterialTheme.colorScheme.surfaceVariant,
                     contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            text = WorkflowLibraryCopy.format(row.format, language)
-                                .split(" ")
-                                .firstOrNull()
-                                .orEmpty(),
-                            style = MaterialTheme.typography.labelMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(horizontal = 4.dp),
-                        )
-                    }
+                    WorkflowThumbnail(
+                        row = row,
+                        imageLoader = imageLoader,
+                    )
                 }
                 Column(
                     modifier = Modifier.weight(1f),
@@ -262,6 +265,38 @@ private fun WorkflowLibraryRow(
                     },
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun WorkflowThumbnail(
+    row: WorkflowLibraryRowState,
+    imageLoader: ImageLoader?,
+) {
+    val thumbnailUrl = row.thumbnailUrl
+    if (thumbnailUrl != null && imageLoader != null) {
+        AsyncImage(
+            model = thumbnailUrl,
+            contentDescription = row.title,
+            imageLoader = imageLoader,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .fillMaxSize()
+                .clip(RoundedCornerShape(8.dp)),
+        )
+    } else {
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "🧩",
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 4.dp),
+            )
         }
     }
 }

@@ -28,6 +28,7 @@ import com.comfymobile.data.workflow.WorkflowImporter
 import com.comfymobile.db.ComfyMobileDb
 import com.comfymobile.data.descriptor.NodeDescriptorRegistry
 import com.comfymobile.data.image.ComfyImageMapper
+import com.comfymobile.data.image.ComfyOutputRef
 import com.comfymobile.data.image.PreviewFormat
 import com.comfymobile.data.image.PreviewSpec
 import com.comfymobile.data.image.createComfyImageLoader
@@ -325,12 +326,30 @@ fun appModule(): Module = module {
     }
 
     factory<WorkflowLibraryViewModel> { (vmScope: CoroutineScope) ->
+        val activeServerHolder = get<ActiveServerHolder>()
+        val imageMapper = ComfyImageMapper(
+            activeBaseUrlProvider = { activeServerHolder.current.value?.baseUrl },
+            defaultPreview = PreviewSpec(
+                format = PreviewFormat.JPEG,
+                quality = 80,
+            ),
+        )
         WorkflowLibraryViewModel(
             repository = get(),
-            activeServer = get(),
+            jobRepository = get(),
+            activeServer = activeServerHolder,
             connectionState = get<ConnectionStateMachineFacade>().currentState,
             scope = vmScope,
             nowEpochMs = { nowEpochMs() },
+            thumbnailUrlForOutput = { output ->
+                imageMapper.map(
+                    ComfyOutputRef(
+                        filename = output.filename,
+                        subfolder = output.subfolder,
+                        type = output.type,
+                    ),
+                )
+            },
         )
     }
 

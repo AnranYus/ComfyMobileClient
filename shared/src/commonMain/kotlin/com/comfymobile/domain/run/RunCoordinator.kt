@@ -316,6 +316,7 @@ class RunCoordinator(
                 Job(
                     promptId = response.prompt_id,
                     serverId = submission.serverId,
+                    workflowId = submission.workflowId,
                     status = JobStatus.QUEUED,
                     workflowSnapshotJson = submission.workflowSnapshotJson,
                     apiPromptJson = null, // optional; large; skipped for now
@@ -623,6 +624,10 @@ class RunCoordinator(
  *    for the *entire* run lifecycle.
  *  - [clientId]: the WS client id; included in `PromptRequestDto.client_id`
  *    so the server stamps emitted events with the same id our WS reads.
+ *  - [workflowId]: local persisted workflow id, when the run originated
+ *    from Library → Graph. It remains stable even after ParamEditor
+ *    mutates the UI snapshot, and is used by the Library thumbnail
+ *    surface to associate outputs back to the row.
  *  - [workflowUi]: the UI-form workflow snapshot (typically the user's
  *    current edited graph). Converted to API form internally.
  *  - [objectInfo]: optional `/object_info` cache to help the converter
@@ -640,6 +645,7 @@ data class RunSubmission(
     val serverId: String,
     val baseUrl: String,
     val clientId: String,
+    val workflowId: String? = null,
     val workflowUi: WorkflowGraph.Ui,
     val objectInfo: JsonElement? = null,
     val workflowSnapshotJson: String? = null,

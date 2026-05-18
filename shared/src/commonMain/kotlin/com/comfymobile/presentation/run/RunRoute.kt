@@ -65,6 +65,7 @@ import org.koin.core.parameter.parametersOf
 @Composable
 fun RunRoute(
     workflow: WorkflowEnvelope?,
+    workflowId: String? = null,
     modifier: Modifier = Modifier,
     onSuccess: (promptId: String, outputs: List<JobOutputRef>) -> Unit = { _, _ -> },
     onClose: () -> Unit = {},
@@ -83,6 +84,7 @@ fun RunRoute(
             vm.prepare(
                 PreparedWorkflow(
                     envelope = workflow,
+                    workflowId = workflowId,
                     label = workflow.metadata.label,
                 )
             )

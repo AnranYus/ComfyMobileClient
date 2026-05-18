@@ -156,6 +156,8 @@ data class RunUiState(
  */
 data class PreparedWorkflow(
     val envelope: WorkflowEnvelope,
+    /** Persisted workflow row id for Library → Graph submissions. */
+    val workflowId: String? = null,
     /** Optional `/object_info` payload for [com.comfymobile.domain.workflow.WorkflowConverter]. */
     val objectInfo: JsonElement? = null,
     /** Optional user-visible label persisted on the [com.comfymobile.domain.job.Job] row. */

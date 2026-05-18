@@ -17,13 +17,19 @@ class InMemoryJobRepositoryTest {
     private fun job(
         promptId: String,
         serverId: String = "srv-A",
+        workflowId: String? = null,
         status: JobStatus = JobStatus.QUEUED,
         createdAt: Long = 1000L,
+        finishedAt: Long? = null,
+        firstOutput: JobOutputRef? = null,
     ) = Job(
         promptId = promptId,
         serverId = serverId,
+        workflowId = workflowId,
         status = status,
+        firstOutput = firstOutput,
         createdAtEpochMs = createdAt,
+        finishedAtEpochMs = finishedAt,
     )
 
     @Test fun upsert_then_getByPromptId_returns_inserted_row() = runTest {
@@ -132,6 +138,55 @@ class InMemoryJobRepositoryTest {
         repo.upsert(job(promptId = "p-6", serverId = "srv-B", status = JobStatus.RUNNING, createdAt = 6L))
         val inflight = repo.listInFlight("srv-A").map { it.promptId }.toSet()
         assertEquals(setOf("p-1", "p-2"), inflight)
+    }
+
+    @Test fun observeSucceededWithFirstOutputByServer_filters_and_orders_by_terminal_time() = runTest {
+        val repo = InMemoryJobRepository()
+        repo.upsert(job(
+            promptId = "old-success",
+            workflowId = "wf-1",
+            status = JobStatus.SUCCEEDED,
+            createdAt = 100L,
+            finishedAt = 200L,
+            firstOutput = JobOutputRef("old.png"),
+        ))
+        repo.upsert(job(
+            promptId = "new-success",
+            workflowId = "wf-1",
+            status = JobStatus.SUCCEEDED,
+            createdAt = 120L,
+            finishedAt = 300L,
+            firstOutput = JobOutputRef("new.png"),
+        ))
+        repo.upsert(job(
+            promptId = "no-output",
+            workflowId = "wf-1",
+            status = JobStatus.SUCCEEDED,
+            createdAt = 500L,
+            finishedAt = 600L,
+            firstOutput = null,
+        ))
+        repo.upsert(job(
+            promptId = "failed",
+            workflowId = "wf-1",
+            status = JobStatus.FAILED,
+            createdAt = 700L,
+            finishedAt = 800L,
+            firstOutput = JobOutputRef("failed.png"),
+        ))
+        repo.upsert(job(
+            promptId = "other-server",
+            serverId = "srv-B",
+            workflowId = "wf-1",
+            status = JobStatus.SUCCEEDED,
+            createdAt = 900L,
+            finishedAt = 1000L,
+            firstOutput = JobOutputRef("other.png"),
+        ))
+
+        val rows = repo.observeSucceededWithFirstOutputByServer("srv-A").first()
+
+        assertEquals(listOf("new-success", "old-success"), rows.map { it.promptId })
     }
 
     @Test fun deleteByServer_removes_rows_for_only_that_server() = runTest {

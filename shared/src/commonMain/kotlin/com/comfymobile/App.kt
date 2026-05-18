@@ -55,7 +55,7 @@ import org.koin.core.parameter.parametersOf
  *           ├─ tap row ───────→ AppScreen.Graph(workflowId)
  *           │                        │
  *           │                        ├─ back arrow → AppScreen.Idle
- *           │                        └─ Run FAB ─→ AppScreen.Running(envelope)
+ *           │                        └─ Run FAB ─→ AppScreen.Running(workflowId, envelope)
  *           │                                          │
  *           │                                          ├─ RunState.Succeeded
  *           │                                          │   → AppScreen.Gallery
@@ -195,11 +195,15 @@ fun App() {
                         displayName = current.displayName,
                         onBack = { screen = AppScreen.Idle },
                         onRun = { envelope ->
-                            screen = AppScreen.Running(envelope)
+                            screen = AppScreen.Running(
+                                workflowId = current.workflowId,
+                                envelope = envelope,
+                            )
                         },
                     )
                     is AppScreen.Running -> RunRoute(
                         workflow = current.envelope,
+                        workflowId = current.workflowId,
                         onSuccess = { promptId, outputs ->
                             // Per @Lily PR #32 review msg `5a73db76`
                             // blocker 2: preserve stable job identity

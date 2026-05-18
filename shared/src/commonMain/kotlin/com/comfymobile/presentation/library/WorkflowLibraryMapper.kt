@@ -5,9 +5,12 @@ import com.comfymobile.domain.workflow.WorkflowRow
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
 
-internal fun WorkflowRow.toLibraryRowState(): WorkflowLibraryRowState = WorkflowLibraryRowState(
+internal fun WorkflowRow.toLibraryRowState(
+    thumbnailUrl: String? = null,
+): WorkflowLibraryRowState = WorkflowLibraryRowState(
     workflowId = workflowId,
     title = displayName,
+    thumbnailUrl = thumbnailUrl,
     nodeCount = envelope.nodeCount(),
     format = when (envelope.format) {
         WorkflowFormat.UI -> WorkflowLibraryFormat.Ui

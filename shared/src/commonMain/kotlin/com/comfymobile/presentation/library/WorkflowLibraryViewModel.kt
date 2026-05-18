@@ -2,11 +2,15 @@ package com.comfymobile.presentation.library
 
 import com.comfymobile.data.connect.ActiveServerHolder
 import com.comfymobile.data.network.ConnectionState
+import com.comfymobile.domain.job.Job
+import com.comfymobile.domain.job.JobOutputRef
+import com.comfymobile.domain.job.JobRepository
 import com.comfymobile.domain.workflow.WorkflowRepository
 import com.comfymobile.domain.workflow.WorkflowRow
 import com.comfymobile.presentation.connection.ConnectionLanguage
 import com.comfymobile.presentation.connection.ConnectionStatusTone
 import com.comfymobile.presentation.connection.ConnectionStatusUi
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -15,15 +19,21 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class WorkflowLibraryViewModel(
     private val repository: WorkflowRepository,
+    private val jobRepository: JobRepository,
     private val activeServer: ActiveServerHolder,
     private val connectionState: StateFlow<ConnectionState>,
     private val scope: CoroutineScope,
     private val nowEpochMs: () -> Long,
+    private val thumbnailUrlForOutput: (JobOutputRef) -> String? = { null },
     private val language: ConnectionLanguage = ConnectionLanguage.En,
 ) {
     private val pendingDeleteId = MutableStateFlow<String?>(null)
@@ -32,27 +42,58 @@ class WorkflowLibraryViewModel(
     private val pendingRename = combine(pendingRenameId, renameDraft) { id, draft ->
         PendingRename(id = id, draft = draft)
     }
-    private val mutableOpenEvents = MutableSharedFlow<WorkflowRow>(extraBufferCapacity = 1)
-    val openEvents: Flow<WorkflowRow> = mutableOpenEvents.asSharedFlow()
-
-    val state: StateFlow<WorkflowLibraryScreenState> = combine(
+    private val succeededOutputJobs = activeServer.current.flatMapLatest { server ->
+        if (server == null) {
+            flowOf(ThumbnailJobSnapshot(serverId = null, jobs = emptyList()))
+        } else {
+            jobRepository.observeSucceededWithFirstOutputByServer(server.serverId)
+                .map { jobs -> ThumbnailJobSnapshot(serverId = server.serverId, jobs = jobs) }
+        }
+    }
+    private val librarySources = combine(
         repository.observeAll(),
         activeServer.current,
         connectionState,
         pendingDeleteId,
         pendingRename,
     ) { workflows, server, connection, pendingDelete, pendingRename ->
-        val rows = workflows.map { it.toLibraryRowState() }
-        val statusUi = ConnectionStatusUi.from(connection, server)
+        LibrarySources(
+            workflows = workflows,
+            server = server,
+            connection = connection,
+            pendingDelete = pendingDelete,
+            pendingRename = pendingRename,
+        )
+    }
+    private val mutableOpenEvents = MutableSharedFlow<WorkflowRow>(extraBufferCapacity = 1)
+    val openEvents: Flow<WorkflowRow> = mutableOpenEvents.asSharedFlow()
+
+    val state: StateFlow<WorkflowLibraryScreenState> = combine(
+        librarySources,
+        succeededOutputJobs,
+    ) { sources, outputSnapshot ->
+        val latestOutputsByWorkflowId =
+            if (outputSnapshot.serverId == sources.server?.serverId) {
+                outputSnapshot.jobs.latestOutputsByWorkflowId()
+            } else {
+                emptyMap()
+            }
+        val rows = sources.workflows.map { workflow ->
+            workflow.toLibraryRowState(
+                thumbnailUrl = latestOutputsByWorkflowId[workflow.workflowId]
+                    ?.let(thumbnailUrlForOutput),
+            )
+        }
+        val statusUi = ConnectionStatusUi.from(sources.connection, sources.server)
         WorkflowLibraryScreenState(
             rows = rows,
-            activeServerLabel = server?.label,
+            activeServerLabel = sources.server?.label,
             connectionLabel = statusUi.label,
             connectionTone = statusUi.tone,
             connectionPulsing = statusUi.pulsing,
-            pendingDelete = rows.firstOrNull { it.workflowId == pendingDelete },
-            pendingRename = rows.firstOrNull { it.workflowId == pendingRename.id },
-            renameDraft = pendingRename.draft,
+            pendingDelete = rows.firstOrNull { it.workflowId == sources.pendingDelete },
+            pendingRename = rows.firstOrNull { it.workflowId == sources.pendingRename.id },
+            renameDraft = sources.pendingRename.draft,
             language = language,
         )
     }.stateIn(
@@ -135,4 +176,26 @@ class WorkflowLibraryViewModel(
         val id: String?,
         val draft: String,
     )
+
+    private data class LibrarySources(
+        val workflows: List<WorkflowRow>,
+        val server: com.comfymobile.domain.server.ServerInfo?,
+        val connection: ConnectionState,
+        val pendingDelete: String?,
+        val pendingRename: PendingRename,
+    )
+
+    private data class ThumbnailJobSnapshot(
+        val serverId: String?,
+        val jobs: List<Job>,
+    )
+
+    private fun List<Job>.latestOutputsByWorkflowId(): Map<String, JobOutputRef> =
+        buildMap {
+            for (job in this@latestOutputsByWorkflowId) {
+                val key = job.workflowId?.takeIf { it.isNotBlank() } ?: continue
+                val output = job.firstOutput ?: continue
+                if (!containsKey(key)) put(key, output)
+            }
+        }
 }

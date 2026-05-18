@@ -19,6 +19,12 @@ CREATE TABLE jobIndex (
     -- multiple ComfyUI instances without leaking history.
     server_id TEXT NOT NULL,
 
+    -- Persisted workflow row that launched this job. Nullable for
+    -- legacy rows and server-history imports. This is the stable
+    -- association Library thumbnails use; workflow_snapshot_json is
+    -- the edited snapshot and may differ after ParamEditor changes.
+    workflow_id TEXT,
+
     -- Status enum; mirrors the lifecycle in domain/job/JobStatus.kt.
     -- Stored as TEXT for human-readable DB inspection; the repository
     -- layer maps to/from the enum.
@@ -64,6 +70,11 @@ CREATE TABLE jobIndex (
 CREATE INDEX jobIndex_byServer_byCreated
     ON jobIndex(server_id, created_at DESC);
 
+-- Library thumbnail lookup: newest successful local product job for
+-- a workflow row, per active server.
+CREATE INDEX jobIndex_byServer_byWorkflow_byFinished
+    ON jobIndex(server_id, workflow_id, finished_at DESC, created_at DESC);
+
 -- ----- queries -----
 
 -- Used for the JobRepository.upsert() entry point. SQLite's
@@ -73,13 +84,13 @@ CREATE INDEX jobIndex_byServer_byCreated
 -- collide on the PRIMARY KEY constraint.
 upsertJob:
 INSERT OR REPLACE INTO jobIndex(
-    prompt_id, server_id, status,
+    prompt_id, server_id, workflow_id, status,
     workflow_snapshot_json, api_prompt_json,
     label,
     first_output_filename, first_output_subfolder, first_output_type,
     is_favorite,
     created_at, finished_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 updateStatus:
 UPDATE jobIndex SET status = ?, finished_at = ? WHERE prompt_id = ?;
@@ -105,6 +116,15 @@ SELECT * FROM jobIndex
 WHERE server_id = ?
 ORDER BY created_at DESC
 LIMIT :limit OFFSET :offset;
+
+selectSucceededWithFirstOutputByServer:
+SELECT * FROM jobIndex
+WHERE server_id = ?
+  AND workflow_id IS NOT NULL
+  AND status = 'succeeded'
+  AND first_output_filename IS NOT NULL
+ORDER BY COALESCE(finished_at, created_at) DESC,
+         created_at DESC;
 
 selectInflight:
 SELECT * FROM jobIndex
