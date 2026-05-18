@@ -30,6 +30,9 @@ interface WorkflowRepository {
     /** Mark a workflow as opened and return the updated row. */
     suspend fun markOpened(workflowId: String, openedAtEpochMs: Long): WorkflowRow?
 
+    /** Update a workflow's library display name and return the updated row. */
+    suspend fun rename(workflowId: String, displayName: String): WorkflowRow?
+
     /** Delete one imported workflow. */
     suspend fun delete(workflowId: String)
 }

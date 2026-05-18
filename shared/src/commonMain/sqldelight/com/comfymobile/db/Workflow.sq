@@ -48,5 +48,8 @@ LIMIT :limit;
 markWorkflowOpened:
 UPDATE workflow SET last_opened_at = ? WHERE id = ?;
 
+renameWorkflow:
+UPDATE workflow SET friendly_name = ? WHERE id = ?;
+
 deleteWorkflow:
 DELETE FROM workflow WHERE id = ?;

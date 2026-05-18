@@ -94,6 +94,17 @@ class InMemoryWorkflowRepositoryTest {
         )
     }
 
+    @Test fun rename_updates_display_name_and_envelope_label() = runTest {
+        val repository = InMemoryWorkflowRepository()
+        val row = repository.upsert(envelope(label = "Before", createdAt = 100L))
+
+        val renamed = repository.rename(row.workflowId, "After")
+
+        assertEquals("After", renamed?.displayName)
+        assertEquals("After", repository.getById(row.workflowId)?.displayName)
+        assertEquals("After", repository.getById(row.workflowId)?.envelope?.metadata?.label)
+    }
+
     @Test fun delete_removes_workflow() = runTest {
         val repository = InMemoryWorkflowRepository()
         val row = repository.upsert(envelope(label = "Delete me", createdAt = 100L))

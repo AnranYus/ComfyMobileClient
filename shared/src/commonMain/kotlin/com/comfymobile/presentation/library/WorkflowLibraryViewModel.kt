@@ -27,6 +27,11 @@ class WorkflowLibraryViewModel(
     private val language: ConnectionLanguage = ConnectionLanguage.En,
 ) {
     private val pendingDeleteId = MutableStateFlow<String?>(null)
+    private val pendingRenameId = MutableStateFlow<String?>(null)
+    private val renameDraft = MutableStateFlow("")
+    private val pendingRename = combine(pendingRenameId, renameDraft) { id, draft ->
+        PendingRename(id = id, draft = draft)
+    }
     private val mutableOpenEvents = MutableSharedFlow<WorkflowRow>(extraBufferCapacity = 1)
     val openEvents: Flow<WorkflowRow> = mutableOpenEvents.asSharedFlow()
 
@@ -35,7 +40,8 @@ class WorkflowLibraryViewModel(
         activeServer.current,
         connectionState,
         pendingDeleteId,
-    ) { workflows, server, connection, pendingDelete ->
+        pendingRename,
+    ) { workflows, server, connection, pendingDelete, pendingRename ->
         val rows = workflows.map { it.toLibraryRowState() }
         val statusUi = ConnectionStatusUi.from(connection, server)
         WorkflowLibraryScreenState(
@@ -45,6 +51,8 @@ class WorkflowLibraryViewModel(
             connectionTone = statusUi.tone,
             connectionPulsing = statusUi.pulsing,
             pendingDelete = rows.firstOrNull { it.workflowId == pendingDelete },
+            pendingRename = rows.firstOrNull { it.workflowId == pendingRename.id },
+            renameDraft = pendingRename.draft,
             language = language,
         )
     }.stateIn(
@@ -60,6 +68,10 @@ class WorkflowLibraryViewModel(
     fun actions(onImport: () -> Unit = {}): WorkflowLibraryActions = WorkflowLibraryActions(
         onImport = onImport,
         onOpenWorkflow = ::openWorkflow,
+        onRenameRequested = ::requestRename,
+        onRenameValueChanged = ::updateRenameDraft,
+        onDismissRename = ::dismissRename,
+        onConfirmRename = ::confirmRename,
         onDeleteRequested = ::requestDelete,
         onDismissDelete = ::dismissDelete,
         onConfirmDelete = ::deleteWorkflow,
@@ -71,6 +83,36 @@ class WorkflowLibraryViewModel(
                 workflowId = workflowId,
                 openedAtEpochMs = nowEpochMs(),
             )?.let { mutableOpenEvents.emit(it) }
+        }
+    }
+
+    fun requestRename(workflowId: String) {
+        val row = state.value.rows.firstOrNull { it.workflowId == workflowId } ?: return
+        pendingRenameId.value = workflowId
+        renameDraft.value = row.title
+    }
+
+    fun updateRenameDraft(value: String) {
+        renameDraft.value = value
+    }
+
+    fun dismissRename() {
+        pendingRenameId.value = null
+        renameDraft.value = ""
+    }
+
+    fun confirmRename() {
+        val workflowId = pendingRenameId.value ?: return
+        val displayName = renameDraft.value.trim()
+        val currentName = state.value.pendingRename?.title
+        if (displayName.isEmpty() || displayName == currentName) return
+        pendingRenameId.value = null
+        renameDraft.value = ""
+        scope.launch {
+            repository.rename(
+                workflowId = workflowId,
+                displayName = displayName,
+            )
         }
     }
 
@@ -88,4 +130,9 @@ class WorkflowLibraryViewModel(
             repository.delete(workflowId)
         }
     }
+
+    private data class PendingRename(
+        val id: String?,
+        val draft: String,
+    )
 }
