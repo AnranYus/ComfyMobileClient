@@ -306,6 +306,13 @@ fun appModule(): Module = module {
         )
     }
 
+    factory<com.comfymobile.presentation.workflow.WorkflowGraphViewModel> { (vmScope: CoroutineScope) ->
+        com.comfymobile.presentation.workflow.WorkflowGraphViewModel(
+            repository = get(),
+            scope = vmScope,
+        )
+    }
+
     factory<HistoryViewModel> { (vmScope: CoroutineScope) ->
         HistoryViewModel(
             repository = get(),
