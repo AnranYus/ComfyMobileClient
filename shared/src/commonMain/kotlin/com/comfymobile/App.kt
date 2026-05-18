@@ -2,28 +2,21 @@ package com.comfymobile
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import coil3.ImageLoader
 import com.comfymobile.data.connect.ActiveServerHolder
 import com.comfymobile.data.connect.ConnectAttemptCoordinator
 import com.comfymobile.data.connection.ConnectionStateMachineFacade
-import com.comfymobile.data.image.ComfyImageMapper
 import com.comfymobile.data.image.ComfyOutputRef
 import com.comfymobile.data.run.RunReconciler
 import com.comfymobile.data.workflow.WorkflowImporter
@@ -37,33 +30,39 @@ import com.comfymobile.presentation.importer.WorkflowImportRoute
 import com.comfymobile.presentation.importer.WorkflowImportViewModel
 import com.comfymobile.presentation.library.WorkflowLibraryRoute
 import com.comfymobile.presentation.library.WorkflowLibraryViewModel
-import com.comfymobile.presentation.run.RunCopy
+import com.comfymobile.presentation.parameditor.ParamEditorViewModel
 import com.comfymobile.presentation.run.RunRoute
+import com.comfymobile.presentation.workflow.WorkflowGraphRoute
+import com.comfymobile.presentation.workflow.WorkflowGraphViewModel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.koin.compose.getKoin
+import org.koin.compose.koinInject
 import org.koin.core.parameter.parametersOf
 
 /**
  * Root Composable shared between Android and iOS.
  *
- * T1.4b part 3d-ii rewires this from the Phase 1.0 Hello-screen to
- * the live connect flow. T2.3 follow-up adds the MVP loop wiring:
+ * Phase 2 close-out nav flow per @Ores T2.7 §1.10 / @Priestess msg
+ * `e79c6991`:
  *
- *   ConnectRoute until an active server exists, then WorkflowLibraryRoute
- *   plus WorkflowImportRoute dialogs.
+ *   ConnectRoute (until active server)
  *     │
- *     ├─ WorkflowLibraryRoute exposes persisted workflows and the
- *     │    import entry. Until WorkflowGraphRoute lands, tapping a row
- *     │    selects it as the active workflow seam for the Run FAB.
- *     │
- *     ├─ tap Run → AppScreen.Running(envelope) → RunRoute overlay.
- *     │
- *     ├─ RunRoute observes Succeeded → onSuccess(outputs) callback fires;
- *     │    AppScreen.Gallery(promptId, outputs) → OutputGalleryRoute overlay.
- *     │
- *     ├─ RunRoute terminal-sheet Close → onClose → AppScreen.Idle.
- *     │
- *     └─ Gallery back → AppScreen.Idle.
+ *     └─→ WorkflowLibraryRoute (always-on background once connected)
+ *           │
+ *           ├─ tap row ───────→ AppScreen.Graph(workflowId)
+ *           │                        │
+ *           │                        ├─ back arrow → AppScreen.Idle
+ *           │                        └─ Run FAB ─→ AppScreen.Running(envelope)
+ *           │                                          │
+ *           │                                          ├─ RunState.Succeeded
+ *           │                                          │   → AppScreen.Gallery
+ *           │                                          └─ user dismisses
+ *           │                                              terminal → Idle
+ *           │
+ *           └─ import FAB → WorkflowImportRoute dialog
  *
  * Per @Lily T2.3 follow-up gates (msg `39168de4`):
  *  - Navigation never bypasses RunCoordinator (the FAB calls
@@ -73,6 +72,11 @@ import org.koin.core.parameter.parametersOf
  *  - B/C banner & history reconciliation do not override the run
  *    terminal — terminal is authoritative, so the host fires
  *    onSuccess off the Succeeded phase only, not off ConnectionState.
+ *
+ * Per @Ores §1.10 acceptance contract: the Run FAB is the only Run
+ * entry point post-T2.6 and it lives inside `WorkflowGraphRoute`. The
+ * App.kt bottom-start Run FAB (T2.3 follow-up MVP shortcut) and the
+ * `selectedWorkflow` state that drove it were removed in this PR.
  *
  * Process-level lifecycle (state machine + bootstrap start/stop) is
  * the platform host's job, not this composable's. Per @Lily PR #18
@@ -145,18 +149,8 @@ fun App() {
 
             // ----------------------------------------------------------------- MVP nav state
             var screen by remember { mutableStateOf<AppScreen>(AppScreen.Idle) }
-            var selectedWorkflow by remember { mutableStateOf<com.comfymobile.domain.workflow.WorkflowRow?>(null) }
             val connectState by viewModel.screenState.collectAsState()
-            val importState by importViewModel.state.collectAsState()
-            LaunchedEffect(importState.lastImportedRow?.workflowId) {
-                importState.lastImportedRow?.let { selectedWorkflow = it }
-            }
             val hasActiveServer = connectState.activeServer != null
-            val canRun = canShowRunShortcut(
-                selectedWorkflowId = selectedWorkflow?.workflowId,
-                hasActiveServer = hasActiveServer,
-                screen = screen,
-            )
 
             Box(modifier = Modifier.fillMaxSize()) {
                 if (!hasActiveServer) {
@@ -165,14 +159,23 @@ fun App() {
                     WorkflowLibraryRoute(
                         viewModel = libraryViewModel,
                         onImport = { importViewModel.openSheet() },
-                        onWorkflowOpened = { selectedWorkflow = it },
+                        // Per @Ores T2.7 §1.10: tap-row destination is
+                        // WorkflowGraphRoute. The library VM owns the
+                        // `markOpened` side effect; we just navigate.
+                        onWorkflowOpened = { row ->
+                            screen = AppScreen.Graph(
+                                workflowId = row.workflowId,
+                                displayName = row.displayName,
+                            )
+                        },
                         onWorkflowDeleted = { deletedWorkflowId ->
-                            if (shouldClearSelectedWorkflowAfterDelete(
-                                    selectedWorkflowId = selectedWorkflow?.workflowId,
-                                    deletedWorkflowId = deletedWorkflowId,
-                                )
-                            ) {
-                                selectedWorkflow = null
+                            // If the user is currently inside the Graph
+                            // view for the workflow that's being
+                            // deleted, pop back to Library so they don't
+                            // see a broken "not found" state on the next
+                            // re-render. See `shouldPopGraphAfterDelete`.
+                            if (shouldPopGraphAfterDelete(screen, deletedWorkflowId)) {
+                                screen = AppScreen.Idle
                             }
                         },
                         modifier = Modifier.fillMaxSize(),
@@ -184,31 +187,17 @@ fun App() {
                     showFab = false,
                 )
 
-                // Run FAB visible only on the Idle screen with a loaded
-                // workflow. The FAB itself does not call into
-                // RunCoordinator — it only sets nav state to Running;
-                // RunRoute then drives submission via the coordinator.
-                if (canRun) {
-                    ExtendedFloatingActionButton(
-                        onClick = {
-                            if (!hasActiveServer) return@ExtendedFloatingActionButton
-                            val envelope = selectedWorkflow?.envelope ?: return@ExtendedFloatingActionButton
-                            screen = AppScreen.Running(envelope)
-                        },
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .padding(20.dp),
-                    ) {
-                        // Localized via the import surface's language —
-                        // the Run FAB and the import FAB live on the
-                        // same screen so they should resolve the same.
-                        Text(RunCopy.run.resolve(importState.language))
-                    }
-                }
-
                 // Exclusive overlays for the active MVP screen.
                 when (val current = screen) {
                     is AppScreen.Idle -> Unit
+                    is AppScreen.Graph -> AppGraphOverlay(
+                        workflowId = current.workflowId,
+                        displayName = current.displayName,
+                        onBack = { screen = AppScreen.Idle },
+                        onRun = { envelope ->
+                            screen = AppScreen.Running(envelope)
+                        },
+                    )
                     is AppScreen.Running -> RunRoute(
                         workflow = current.envelope,
                         onSuccess = { promptId, outputs ->
@@ -221,6 +210,12 @@ fun App() {
                                 outputs = outputs,
                             )
                         },
+                        // On run-terminal close we drop the Graph
+                        // overlay too: returning to Library is the
+                        // simplest mental model and avoids stale graph
+                        // state if the user just applied params and
+                        // came back from a failure. Phase 3 may revisit
+                        // (return-to-graph option).
                         onClose = { screen = AppScreen.Idle },
                         modifier = Modifier.fillMaxSize(),
                     )
@@ -235,6 +230,86 @@ fun App() {
                 }
             }
         }
+    }
+}
+
+/**
+ * Thin wrapper that resolves a page-scoped [WorkflowGraphViewModel] +
+ * [ParamEditorViewModel] pair from Koin and feeds them to
+ * [WorkflowGraphRoute]. Both VMs share a single page scope so they're
+ * cancelled together when the user leaves the Graph overlay.
+ *
+ * Per @Ores T2.7 §1.10 page-scope contract (and @Lily PR #25 / PR #40
+ * reviews): leaving the Graph overlay (back arrow / Run FAB) MUST
+ * cancel both the workflow-load coroutine and any in-flight
+ * `ParamOptionProvider.load` request. The `SupervisorJob` parented to
+ * the composable scope gives us exactly that — when the overlay
+ * leaves composition, the parent job is cancelled, which cancels
+ * `pageScope`, which cancels both VMs' coroutines.
+ */
+@Composable
+private fun AppGraphOverlay(
+    workflowId: String,
+    displayName: String,
+    onBack: () -> Unit,
+    onRun: (com.comfymobile.domain.workflow.WorkflowEnvelope) -> Unit,
+) {
+    val composeScope = rememberCoroutineScope()
+    val pageScope = remember(composeScope) {
+        CoroutineScope(SupervisorJob(composeScope.coroutineContext[Job]))
+    }
+    val graphVm: WorkflowGraphViewModel =
+        koinInject { parametersOf(pageScope) }
+    val paramVm: ParamEditorViewModel =
+        koinInject { parametersOf(pageScope) }
+
+    // Load on (re)compose for this workflowId. Internal generation
+    // guards inside the VM make repeated calls with the same id safe.
+    DisposableEffect(graphVm, workflowId) {
+        graphVm.load(workflowId)
+        onDispose { /* page scope cancellation handles teardown */ }
+    }
+
+    // Bridge `ConnectionState` → graph VM's connected flag so the Run
+    // FAB enables when the server is reachable. We keep this
+    // observation out of the VM so its unit tests don't need a state
+    // machine fixture (per WorkflowGraphViewModel design comment).
+    val koin = getKoin()
+    val connectMachine = remember { koin.get<ConnectionStateMachineFacade>() }
+    val connectionState by connectMachine.currentState.collectAsState()
+    LaunchedEffectConnected(connectionState, graphVm)
+
+    // `displayName` is captured by the host nav as a hint so the top
+    // bar doesn't flash empty during the suspending load. We don't
+    // need to propagate it into the VM today — the VM's load() sets
+    // displayName once getById returns — but it stays in
+    // [AppScreen.Graph] for a future enhancement that surfaces a
+    // header skeleton.
+    @Suppress("UNUSED_PARAMETER")
+    val displayNameAnchor = displayName
+
+    WorkflowGraphRoute(
+        viewModel = graphVm,
+        paramEditorViewModel = paramVm,
+        onBack = onBack,
+        onRun = onRun,
+        modifier = Modifier.fillMaxSize(),
+    )
+}
+
+/**
+ * Compose-side helper that maps `ConnectionState.isConnected` (proxy:
+ * any state subclass that is `Connected`) → `graphVm.setConnected`.
+ * Keeps the boolean-pump pattern out of the route Composable.
+ */
+@Composable
+private fun LaunchedEffectConnected(
+    state: com.comfymobile.data.network.ConnectionState,
+    vm: WorkflowGraphViewModel,
+) {
+    val connected = state is com.comfymobile.data.network.ConnectionState.Connected
+    androidx.compose.runtime.LaunchedEffect(connected) {
+        vm.setConnected(connected)
     }
 }
 
