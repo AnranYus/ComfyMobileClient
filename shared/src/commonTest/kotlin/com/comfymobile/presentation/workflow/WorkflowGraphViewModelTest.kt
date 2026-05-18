@@ -1,5 +1,6 @@
 package com.comfymobile.presentation.workflow
 
+import com.comfymobile.data.descriptor.NodeDescriptorRegistry
 import com.comfymobile.domain.workflow.WorkflowEnvelope
 import com.comfymobile.domain.workflow.WorkflowFormat
 import com.comfymobile.domain.workflow.WorkflowMetadata
@@ -53,7 +54,7 @@ class WorkflowGraphViewModelTest {
                 ),
             ),
         )
-        val vm = WorkflowGraphViewModel(repository = repo, scope = backgroundScope)
+        val vm = WorkflowGraphViewModel(repository = repo, registry = emptyRegistry(), scope = backgroundScope)
         vm.load("wf-1")
         // Wait for the launch-driven load to settle (per RunViewModelTest
         // pattern — `first { ... }` suspends until the predicate matches,
@@ -72,7 +73,7 @@ class WorkflowGraphViewModelTest {
 
     @Test fun load_unknown_workflowId_sets_not_found_error() = runTest {
         val repo = FakeRepository(rows = emptyMap())
-        val vm = WorkflowGraphViewModel(repository = repo, scope = backgroundScope)
+        val vm = WorkflowGraphViewModel(repository = repo, registry = emptyRegistry(), scope = backgroundScope)
         vm.load("missing")
         val s = vm.state.first { !it.isLoading }
         assertNull(s.envelope)
@@ -94,7 +95,7 @@ class WorkflowGraphViewModelTest {
                 ),
             ),
         )
-        val vm = WorkflowGraphViewModel(repository = repo, scope = backgroundScope)
+        val vm = WorkflowGraphViewModel(repository = repo, registry = emptyRegistry(), scope = backgroundScope)
         vm.load("wf-api")
         val s = vm.state.first { !it.isLoading }
         assertEquals(envelope, s.envelope, "envelope still set so other surfaces can read it")
@@ -106,7 +107,7 @@ class WorkflowGraphViewModelTest {
     @Test fun loadFromEnvelope_skips_repository_and_renders_immediately() = runTest {
         val envelope = uiEnvelope(twoNodeUiJson())
         val repo = FakeRepository(rows = emptyMap())
-        val vm = WorkflowGraphViewModel(repository = repo, scope = backgroundScope)
+        val vm = WorkflowGraphViewModel(repository = repo, registry = emptyRegistry(), scope = backgroundScope)
         vm.loadFromEnvelope("wf-fresh", "Fresh import", envelope)
         // Synchronous path: no advanceUntilIdle needed because there's no coroutine.
 
@@ -199,7 +200,7 @@ class WorkflowGraphViewModelTest {
 
     @Test fun setConnected_before_load_does_not_enable_canRun() = runTest {
         val repo = FakeRepository(rows = emptyMap())
-        val vm = WorkflowGraphViewModel(repository = repo, scope = backgroundScope)
+        val vm = WorkflowGraphViewModel(repository = repo, registry = emptyRegistry(), scope = backgroundScope)
         vm.setConnected(true)
         assertFalse(
             vm.state.value.canRun,
@@ -254,7 +255,7 @@ class WorkflowGraphViewModelTest {
                 ),
             ),
         )
-        val vm = WorkflowGraphViewModel(repository = repo, scope = scope)
+        val vm = WorkflowGraphViewModel(repository = repo, registry = emptyRegistry(), scope = scope)
         vm.load("wf-1")
         // Suspend until the load coroutine has populated parsedGraph.
         vm.state.first { it.parsedGraph != null }
@@ -339,6 +340,16 @@ class WorkflowGraphViewModelTest {
             lastEditedAtEpochMs = 0L,
         ),
     )
+
+    /**
+     * Tests don't exercise descriptor lookup directly — the VM
+     * forwards the registry to the route's plan builder, which lives
+     * in `WorkflowGraphRoute.kt` (covered by Compose previews + manual
+     * verification). An empty registry suffices for state-transition
+     * tests.
+     */
+    private fun emptyRegistry(): NodeDescriptorRegistry =
+        NodeDescriptorRegistry.fromJson("""{"version":1,"descriptors":[]}""")
 
     private class FakeRepository(private val rows: Map<String, WorkflowRow>) : WorkflowRepository {
         override suspend fun upsert(envelope: WorkflowEnvelope): WorkflowRow =

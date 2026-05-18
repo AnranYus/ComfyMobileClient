@@ -1,5 +1,6 @@
 package com.comfymobile.presentation.workflow
 
+import com.comfymobile.data.descriptor.NodeDescriptorRegistry
 import com.comfymobile.domain.workflow.WorkflowEnvelope
 import com.comfymobile.domain.workflow.WorkflowFormat
 import com.comfymobile.domain.workflow.WorkflowGraph
@@ -56,6 +57,17 @@ import kotlinx.serialization.json.JsonObject
  */
 class WorkflowGraphViewModel(
     private val repository: WorkflowRepository,
+    /**
+     * Node descriptor registry the [WorkflowGraphRoute] uses to resolve
+     * per-node body mode (whitelist → FULL, unknown → TITLE_ONLY),
+     * editable-param previews via `SummaryRowResolver`, and the
+     * non-whitelist toast path through `ParamEditorViewModel.open`.
+     * Per @Lily PR #40 review (`dd3d183d`) blocker 1: production
+     * callers MUST pass a real registry — null/empty makes every node
+     * render as unknown/title-only with no port pins and no summary
+     * rows.
+     */
+    val registry: NodeDescriptorRegistry,
     private val scope: CoroutineScope,
     private val language: ConnectionLanguage = ConnectionLanguage.En,
 ) {

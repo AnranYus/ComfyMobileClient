@@ -25,14 +25,18 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.comfymobile.data.descriptor.NodeDescriptorRegistry
+import com.comfymobile.presentation.graph.GraphPalette
 import com.comfymobile.presentation.graph.InteractiveGraphCanvas
 import com.comfymobile.presentation.graph.LayoutResult
 import com.comfymobile.presentation.graph.NodeRuntimeStatus
 import com.comfymobile.presentation.graph.NodeStyleResolver
 import com.comfymobile.presentation.graph.NodeTitleSpec
-import com.comfymobile.presentation.graph.GraphPalette
 import com.comfymobile.presentation.graph.RenderPlan
 import com.comfymobile.presentation.graph.RenderPlanBuilder
+import com.comfymobile.presentation.graph.SummaryRowResolver
+import com.comfymobile.presentation.graph.rememberGraphPalette
+import com.comfymobile.presentation.graph.rememberSummaryRowPalette
 import com.comfymobile.presentation.parameditor.ParamEditorOverlay
 import com.comfymobile.presentation.parameditor.ParamEditorViewModel
 
@@ -119,6 +123,14 @@ fun WorkflowGraphRoute(
         paramActions.onConsumeApplied()
     }
 
+    // Theme-derived palettes — must be resolved INSIDE the Composable
+    // tree so light / dark / dynamic colour switches reach the
+    // renderer. Per @Lily PR #40 review (`dd3d183d`) blocker 2:
+    // hardcoding `GraphPalette.defaultLightForTesting` bypasses the
+    // theme and breaks dark mode / dynamic colour.
+    val graphPalette = rememberGraphPalette()
+    val summaryRowPalette = rememberSummaryRowPalette()
+
     Scaffold(
         modifier = modifier.fillMaxSize(),
         topBar = {
@@ -162,7 +174,13 @@ fun WorkflowGraphRoute(
                 .fillMaxSize()
                 .padding(innerPadding),
         ) {
-            WorkflowGraphContent(state = state, viewModel = viewModel)
+            WorkflowGraphContent(
+                state = state,
+                viewModel = viewModel,
+                registry = viewModel.registry,
+                graphPalette = graphPalette,
+                summaryRowPalette = summaryRowPalette,
+            )
             // T2.2 drawer overlay — sheet at bottom + error AlertDialog
             // routing. Z-order: drawn AFTER the canvas so the drawer
             // covers it as expected.
@@ -193,6 +211,9 @@ fun WorkflowGraphRoute(
 private fun WorkflowGraphContent(
     state: WorkflowGraphScreenState,
     viewModel: WorkflowGraphViewModel,
+    registry: NodeDescriptorRegistry,
+    graphPalette: GraphPalette,
+    summaryRowPalette: com.comfymobile.presentation.graph.SummaryRowPalette,
 ) {
     when {
         state.isLoading -> {
@@ -221,7 +242,15 @@ private fun WorkflowGraphContent(
                 layoutResult = layout,
                 gestureState = state.gestureState,
                 onIntent = viewModel::onIntent,
-                buildPlan = { visibleBounds -> state.buildPlan(visibleBounds) },
+                buildPlan = { visibleBounds ->
+                    buildPlan(
+                        state = state,
+                        registry = registry,
+                        graphPalette = graphPalette,
+                        summaryRowPalette = summaryRowPalette,
+                        visibleBounds = visibleBounds,
+                    )
+                },
             )
             Spacer(modifier = Modifier.fillMaxWidth())
         }
@@ -244,46 +273,52 @@ private fun WorkflowGraphContent(
  * derived inside the canvas by [InteractiveGraphCanvas] (per @Lily PR
  * #36 viewport-virtualisation contract).
  *
- * Style choices here mirror the production-light path used in
- * `GraphCanvasPreviews`:
- *  - palette: [GraphPalette.defaultLightForTesting] (production
- *    callers wire a theme-derived palette via `rememberGraphPalette`;
- *    for Phase 2 close-out we use the default until the theme palette
- *    seam reaches this route).
- *  - runtime status: all `IDLE` (the route doesn't know about runs;
- *    when a Run starts and the user navigates back here, this route
- *    is no longer in foreground).
- *  - selection: from [WorkflowGraphScreenState.selectedNodeId].
+ * Per @Lily PR #40 review (`dd3d183d`) blockers 1 & 2 the production
+ * path MUST:
+ *  - pass `descriptor = registry.lookup(node.classType)` so whitelist
+ *    nodes get FULL body mode with their port pins and summary rows
+ *    (passing `null` collapses every node to TITLE_ONLY).
+ *  - feed the theme-derived [graphPalette] / [summaryRowPalette] (via
+ *    `rememberGraphPalette()` / `rememberSummaryRowPalette()`) so
+ *    light / dark / dynamic theme switches reach the renderer.
  *
- * Phase-3 polish item: thread an `interactiveLodDowngrade` derived
- * from `state.gestureState.isInteracting` into the builder so edges
- * fall back to straight-line during pan/zoom (the canvas already does
- * this from inside `InteractiveGraphCanvas`'s build closure — we pass
- * it here too for consistency).
+ * Runtime status is `IDLE` here: the route doesn't observe runs (when
+ * a run starts, the user navigates to [com.comfymobile.presentation.run.RunRoute]
+ * which owns the status projection). Status annotation in the graph
+ * during running is a Phase-3 enhancement.
  */
-private fun WorkflowGraphScreenState.buildPlan(
+private fun buildPlan(
+    state: WorkflowGraphScreenState,
+    registry: NodeDescriptorRegistry,
+    graphPalette: GraphPalette,
+    summaryRowPalette: com.comfymobile.presentation.graph.SummaryRowPalette,
     visibleBounds: com.comfymobile.presentation.graph.Rect?,
 ): RenderPlan {
-    val parsed = parsedGraph ?: return RenderPlan(emptyList())
-    val layout = layoutResult ?: return RenderPlan(emptyList())
-    val palette = GraphPalette.defaultLightForTesting
+    val parsed = state.parsedGraph ?: return RenderPlan(emptyList())
+    val layout = state.layoutResult ?: return RenderPlan(emptyList())
     return RenderPlanBuilder.build(
         graph = parsed,
         layoutResult = layout,
         resolveStyle = { node ->
             NodeStyleResolver.resolve(
                 node = node,
-                descriptor = null,
+                descriptor = registry.lookup(node.classType),
                 runtimeStatus = NodeRuntimeStatus.IDLE,
-                palette = palette,
-                isSelected = node.id == selectedNodeId,
+                palette = graphPalette,
+                isSelected = node.id == state.selectedNodeId,
             )
         },
-        resolvePortStyle = { port -> NodeStyleResolver.resolvePort(port, palette) },
-        resolveTitle = { node -> NodeTitleSpec(text = node.classType, italic = false) },
+        resolvePortStyle = { port -> NodeStyleResolver.resolvePort(port, graphPalette) },
+        resolveTitle = { node ->
+            val descriptor = registry.lookup(node.classType)
+            NodeTitleSpec(text = node.classType, italic = descriptor == null)
+        },
+        resolveSummaryRows = { node ->
+            SummaryRowResolver.resolve(node, registry.lookup(node.classType))
+        },
         visibleBounds = visibleBounds,
-        graphPalette = palette,
-        interactiveLodDowngrade = gestureState.isInteracting,
+        graphPalette = graphPalette,
+        summaryRowPalette = summaryRowPalette,
+        interactiveLodDowngrade = state.gestureState.isInteracting,
     )
 }
-

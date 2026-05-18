@@ -41,6 +41,7 @@ private fun WorkflowGraphRoutePreview() {
     val repo = previewRepository("preview-1", "Hello workflow")
     val graphVm = WorkflowGraphViewModel(
         repository = repo,
+        registry = emptyPreviewRegistry(),
         scope = scope,
         language = ConnectionLanguage.En,
     ).also { vm ->
@@ -72,6 +73,7 @@ private fun WorkflowGraphRouteNotFoundPreview() {
     val repo = previewRepository(rows = emptyMap())
     val graphVm = WorkflowGraphViewModel(
         repository = repo,
+        registry = emptyPreviewRegistry(),
         scope = scope,
         language = ConnectionLanguage.En,
     ).also { vm -> vm.load("definitely-missing") }
@@ -104,6 +106,10 @@ private fun previewRepository(
         ),
     ),
 )
+
+private fun emptyPreviewRegistry(): com.comfymobile.data.descriptor.NodeDescriptorRegistry =
+    com.comfymobile.data.descriptor.NodeDescriptorRegistry
+        .fromJson("""{"version":1,"descriptors":[]}""")
 
 private fun previewRepository(rows: Map<String, WorkflowRow>): WorkflowRepository =
     object : WorkflowRepository {

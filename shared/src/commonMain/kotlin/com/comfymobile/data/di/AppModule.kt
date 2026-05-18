@@ -309,6 +309,7 @@ fun appModule(): Module = module {
     factory<com.comfymobile.presentation.workflow.WorkflowGraphViewModel> { (vmScope: CoroutineScope) ->
         com.comfymobile.presentation.workflow.WorkflowGraphViewModel(
             repository = get(),
+            registry = get(),
             scope = vmScope,
         )
     }
