@@ -310,8 +310,17 @@ private fun buildPlan(
         },
         resolvePortStyle = { port -> NodeStyleResolver.resolvePort(port, graphPalette) },
         resolveTitle = { node ->
+            // Per @Lily PR #40 review (`c41778c1`): production title
+            // contract matches T2.1a — user-overridden `title` wins,
+            // otherwise the descriptor's localised `displayName` ("K
+            // 采样器" / "K Sampler"), only falling back to the raw
+            // classType when the node isn't on the whitelist (which
+            // also triggers italic per §1.1).
             val descriptor = registry.lookup(node.classType)
-            NodeTitleSpec(text = node.classType, italic = descriptor == null)
+            val title = node.title
+                ?: descriptor?.displayName?.resolve(state.language)
+                ?: node.classType
+            NodeTitleSpec(text = title, italic = descriptor == null)
         },
         resolveSummaryRows = { node ->
             SummaryRowResolver.resolve(node, registry.lookup(node.classType))
@@ -321,4 +330,18 @@ private fun buildPlan(
         summaryRowPalette = summaryRowPalette,
         interactiveLodDowngrade = state.gestureState.isInteracting,
     )
+}
+
+/**
+ * Local [com.comfymobile.domain.node.LocalizedString] resolver. The
+ * domain type ships with `zh: String` + `en: String?` (en falls back
+ * to zh when missing). Mirrors the private resolvers in
+ * `ParamEditorCore` and `ParamEditorDrawer` — kept local to avoid
+ * leaking a third API surface for the same trivial mapping.
+ */
+private fun com.comfymobile.domain.node.LocalizedString.resolve(
+    language: com.comfymobile.presentation.connection.ConnectionLanguage,
+): String = when (language) {
+    com.comfymobile.presentation.connection.ConnectionLanguage.Zh -> zh
+    com.comfymobile.presentation.connection.ConnectionLanguage.En -> en ?: zh
 }
