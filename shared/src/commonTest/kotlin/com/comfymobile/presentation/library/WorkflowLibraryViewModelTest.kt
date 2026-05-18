@@ -68,6 +68,46 @@ class WorkflowLibraryViewModelTest {
         assertEquals(null, vm.state.value.pendingDelete)
     }
 
+    @Test fun rename_dialog_keeps_dirty_draft_until_confirm() = runTest {
+        val repository = InMemoryWorkflowRepository()
+        val row = repository.upsert(envelope(label = "Original", createdAt = 100L))
+        val vm = viewModel(repository, scope = backgroundScope)
+
+        runCurrent()
+        vm.requestRename(row.workflowId)
+        runCurrent()
+        assertEquals(row.workflowId, vm.state.value.pendingRename?.workflowId)
+        assertEquals("Original", vm.state.value.renameDraft)
+
+        vm.updateRenameDraft("Draft name")
+        runCurrent()
+        assertEquals("Draft name", vm.state.value.renameDraft)
+        assertEquals("Original", repository.getById(row.workflowId)?.displayName)
+
+        vm.dismissRename()
+        runCurrent()
+        assertNull(vm.state.value.pendingRename)
+        assertEquals("", vm.state.value.renameDraft)
+        assertEquals("Original", repository.getById(row.workflowId)?.displayName)
+    }
+
+    @Test fun confirm_rename_updates_repository_and_clears_dialog() = runTest {
+        val repository = InMemoryWorkflowRepository()
+        val row = repository.upsert(envelope(label = "Original", createdAt = 100L))
+        val vm = viewModel(repository, scope = backgroundScope)
+
+        runCurrent()
+        vm.requestRename(row.workflowId)
+        vm.updateRenameDraft("  Production workflow  ")
+        vm.confirmRename()
+        runCurrent()
+
+        assertEquals("Production workflow", repository.getById(row.workflowId)?.displayName)
+        assertEquals("Production workflow", repository.getById(row.workflowId)?.envelope?.metadata?.label)
+        assertNull(vm.state.value.pendingRename)
+        assertEquals("", vm.state.value.renameDraft)
+    }
+
     private fun viewModel(
         repository: InMemoryWorkflowRepository,
         activeServer: ActiveServerHolder = ActiveServerHolder().also { it.setActive(server()) },

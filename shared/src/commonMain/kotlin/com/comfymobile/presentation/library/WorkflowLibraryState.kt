@@ -11,10 +11,19 @@ data class WorkflowLibraryScreenState(
     val connectionTone: ConnectionStatusTone = ConnectionStatusTone.Subtle,
     val connectionPulsing: Boolean = false,
     val pendingDelete: WorkflowLibraryRowState? = null,
+    val pendingRename: WorkflowLibraryRowState? = null,
+    val renameDraft: String = "",
     val language: ConnectionLanguage = ConnectionLanguage.En,
 ) {
     val isEmpty: Boolean
         get() = rows.isEmpty()
+
+    val canConfirmRename: Boolean
+        get() {
+            val target = pendingRename ?: return false
+            val trimmed = renameDraft.trim()
+            return trimmed.isNotEmpty() && trimmed != target.title
+        }
 }
 
 data class WorkflowLibraryRowState(
@@ -34,6 +43,10 @@ enum class WorkflowLibraryFormat {
 data class WorkflowLibraryActions(
     val onImport: () -> Unit = {},
     val onOpenWorkflow: (String) -> Unit = {},
+    val onRenameRequested: (String) -> Unit = {},
+    val onRenameValueChanged: (String) -> Unit = {},
+    val onDismissRename: () -> Unit = {},
+    val onConfirmRename: () -> Unit = {},
     val onDeleteRequested: (String) -> Unit = {},
     val onDismissDelete: () -> Unit = {},
     val onConfirmDelete: (String) -> Unit = {},
@@ -42,6 +55,10 @@ data class WorkflowLibraryActions(
 object WorkflowLibraryCopy {
     val title = LocalizedText(zh = "工作流", en = "Workflows")
     val importWorkflow = LocalizedText(zh = "导入工作流", en = "Import workflow")
+    val rename = LocalizedText(zh = "重命名", en = "Rename")
+    val renameTitle = LocalizedText(zh = "重命名工作流", en = "Rename workflow")
+    val workflowName = LocalizedText(zh = "工作流名称", en = "Workflow name")
+    val save = LocalizedText(zh = "保存", en = "Save")
     val emptyTitle = LocalizedText(zh = "还没有工作流", en = "No workflows yet")
     val emptyBody = LocalizedText(
         zh = "导入 JSON 或带工作流的 PNG 后会出现在这里。",

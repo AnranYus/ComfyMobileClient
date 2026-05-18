@@ -70,6 +70,15 @@ class SqlDelightWorkflowRepository(
             queries.selectWorkflowById(workflowId).executeAsOneOrNull()?.toDomain()
         }
 
+    override suspend fun rename(workflowId: String, displayName: String): WorkflowRow? =
+        withContext(ioDispatcher) {
+            queries.renameWorkflow(
+                friendly_name = displayName,
+                id = workflowId,
+            )
+            queries.selectWorkflowById(workflowId).executeAsOneOrNull()?.toDomain()
+        }
+
     override suspend fun delete(workflowId: String) = withContext(ioDispatcher) {
         queries.deleteWorkflow(workflowId)
     }

@@ -125,6 +125,16 @@ private fun previewRepository(rows: Map<String, WorkflowRow>): WorkflowRepositor
         override suspend fun markOpened(workflowId: String, openedAtEpochMs: Long): WorkflowRow? =
             rows[workflowId]
 
+        override suspend fun rename(workflowId: String, displayName: String): WorkflowRow? =
+            rows[workflowId]?.let { row ->
+                row.copy(
+                    displayName = displayName,
+                    envelope = row.envelope.copy(
+                        metadata = row.envelope.metadata.copy(label = displayName),
+                    ),
+                )
+            }
+
         override suspend fun delete(workflowId: String) { /* no-op */ }
     }
 

@@ -20,6 +20,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -105,6 +106,7 @@ fun WorkflowLibraryScreen(
         }
     }
 
+    RenameDialog(state, actions)
     DeleteDialog(state, actions)
 }
 
@@ -246,6 +248,13 @@ private fun WorkflowLibraryRow(
                 modifier = Modifier.align(Alignment.TopEnd),
             ) {
                 DropdownMenuItem(
+                    text = { Text(WorkflowLibraryCopy.rename.resolve(language)) },
+                    onClick = {
+                        menuExpanded = false
+                        actions.onRenameRequested(row.workflowId)
+                    },
+                )
+                DropdownMenuItem(
                     text = { Text(WorkflowLibraryCopy.delete.resolve(language)) },
                     onClick = {
                         menuExpanded = false
@@ -282,6 +291,40 @@ private fun WorkflowLibraryEmpty(
             )
         }
     }
+}
+
+@Composable
+private fun RenameDialog(
+    state: WorkflowLibraryScreenState,
+    actions: WorkflowLibraryActions,
+) {
+    state.pendingRename ?: return
+    AlertDialog(
+        onDismissRequest = actions.onDismissRename,
+        title = { Text(WorkflowLibraryCopy.renameTitle.resolve(state.language)) },
+        text = {
+            OutlinedTextField(
+                value = state.renameDraft,
+                onValueChange = actions.onRenameValueChanged,
+                label = { Text(WorkflowLibraryCopy.workflowName.resolve(state.language)) },
+                singleLine = true,
+                maxLines = 1,
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = actions.onConfirmRename,
+                enabled = state.canConfirmRename,
+            ) {
+                Text(WorkflowLibraryCopy.save.resolve(state.language))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = actions.onDismissRename) {
+                Text(WorkflowLibraryCopy.cancel.resolve(state.language))
+            }
+        },
+    )
 }
 
 @Composable
