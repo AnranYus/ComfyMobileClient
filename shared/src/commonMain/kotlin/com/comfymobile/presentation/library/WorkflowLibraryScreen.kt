@@ -58,8 +58,12 @@ fun WorkflowLibraryRoute(
     val state by viewModel.state.collectAsState()
     val koin = getKoin()
     val imageLoader = remember(koin) { koin.get<ImageLoader>() }
+    val exportGateway = rememberPlatformWorkflowExportGateway(viewModel::onExportResult)
     LaunchedEffect(viewModel) {
         viewModel.openEvents.collect { onWorkflowOpened(it) }
+    }
+    LaunchedEffect(viewModel, exportGateway) {
+        viewModel.exportEvents.collect { exportGateway.exportJson(it) }
     }
     WorkflowLibraryScreen(
         state = state,
@@ -100,6 +104,7 @@ fun WorkflowLibraryScreen(
                             language = state.language,
                             actions = actions,
                             imageLoader = imageLoader,
+                            exportInProgress = state.exportingWorkflowId != null,
                         )
                     }
                 }
@@ -118,6 +123,7 @@ fun WorkflowLibraryScreen(
 
     RenameDialog(state, actions)
     DeleteDialog(state, actions)
+    ExportErrorDialog(state, actions)
 }
 
 @Composable
@@ -176,6 +182,7 @@ private fun WorkflowLibraryRow(
     language: ConnectionLanguage,
     actions: WorkflowLibraryActions,
     imageLoader: ImageLoader?,
+    exportInProgress: Boolean,
 ) {
     var menuExpanded by remember(row.workflowId) { mutableStateOf(false) }
     Surface(
@@ -250,6 +257,14 @@ private fun WorkflowLibraryRow(
                 onDismissRequest = { menuExpanded = false },
                 modifier = Modifier.align(Alignment.TopEnd),
             ) {
+                DropdownMenuItem(
+                    text = { Text(WorkflowLibraryCopy.exportJson.resolve(language)) },
+                    onClick = {
+                        menuExpanded = false
+                        actions.onExportRequested(row.workflowId)
+                    },
+                    enabled = !exportInProgress,
+                )
                 DropdownMenuItem(
                     text = { Text(WorkflowLibraryCopy.rename.resolve(language)) },
                     onClick = {
@@ -385,6 +400,29 @@ private fun DeleteDialog(
         dismissButton = {
             TextButton(onClick = actions.onDismissDelete) {
                 Text(WorkflowLibraryCopy.cancel.resolve(state.language))
+            }
+        },
+    )
+}
+
+@Composable
+private fun ExportErrorDialog(
+    state: WorkflowLibraryScreenState,
+    actions: WorkflowLibraryActions,
+) {
+    val error = state.exportError ?: return
+    AlertDialog(
+        onDismissRequest = actions.onDismissExportError,
+        title = { Text(WorkflowLibraryCopy.exportFailedTitle.resolve(state.language)) },
+        text = {
+            Text(
+                error.message?.takeIf { it.isNotBlank() }
+                    ?: WorkflowLibraryCopy.exportGenericFailure.resolve(state.language),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = actions.onDismissExportError) {
+                Text(WorkflowLibraryCopy.ok.resolve(state.language))
             }
         },
     )

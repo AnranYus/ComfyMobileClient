@@ -13,6 +13,8 @@ data class WorkflowLibraryScreenState(
     val pendingDelete: WorkflowLibraryRowState? = null,
     val pendingRename: WorkflowLibraryRowState? = null,
     val renameDraft: String = "",
+    val exportingWorkflowId: String? = null,
+    val exportError: WorkflowLibraryExportError? = null,
     val language: ConnectionLanguage = ConnectionLanguage.En,
 ) {
     val isEmpty: Boolean
@@ -34,6 +36,7 @@ data class WorkflowLibraryRowState(
     val format: WorkflowLibraryFormat,
     val importedAtEpochMs: Long,
     val lastOpenedAtEpochMs: Long?,
+    val isExporting: Boolean = false,
 )
 
 enum class WorkflowLibraryFormat {
@@ -44,6 +47,8 @@ enum class WorkflowLibraryFormat {
 data class WorkflowLibraryActions(
     val onImport: () -> Unit = {},
     val onOpenWorkflow: (String) -> Unit = {},
+    val onExportRequested: (String) -> Unit = {},
+    val onDismissExportError: () -> Unit = {},
     val onRenameRequested: (String) -> Unit = {},
     val onRenameValueChanged: (String) -> Unit = {},
     val onDismissRename: () -> Unit = {},
@@ -53,9 +58,24 @@ data class WorkflowLibraryActions(
     val onConfirmDelete: (String) -> Unit = {},
 )
 
+data class WorkflowLibraryExportError(
+    val message: String?,
+)
+
 object WorkflowLibraryCopy {
     val title = LocalizedText(zh = "工作流", en = "Workflows")
     val importWorkflow = LocalizedText(zh = "导入工作流", en = "Import workflow")
+    val exportJson = LocalizedText(zh = "导出 JSON", en = "Export JSON")
+    val exportFailedTitle = LocalizedText(zh = "导出失败", en = "Export failed")
+    val exportUnsupported = LocalizedText(
+        zh = "当前设备暂不支持导出 JSON。",
+        en = "Exporting JSON is not supported on this device.",
+    )
+    val exportGenericFailure = LocalizedText(
+        zh = "无法写入工作流 JSON。",
+        en = "Could not write the workflow JSON.",
+    )
+    val ok = LocalizedText(zh = "知道了", en = "OK")
     val rename = LocalizedText(zh = "重命名", en = "Rename")
     val renameTitle = LocalizedText(zh = "重命名工作流", en = "Rename workflow")
     val workflowName = LocalizedText(zh = "工作流名称", en = "Workflow name")
