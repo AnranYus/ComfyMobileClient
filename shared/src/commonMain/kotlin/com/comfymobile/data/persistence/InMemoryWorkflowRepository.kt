@@ -47,6 +47,18 @@ class InMemoryWorkflowRepository : WorkflowRepository {
         updated
     }
 
+    override suspend fun rename(workflowId: String, displayName: String): WorkflowRow? = mutex.withLock {
+        val existing = state.value[workflowId] ?: return@withLock null
+        val updated = existing.copy(
+            displayName = displayName,
+            envelope = existing.envelope.copy(
+                metadata = existing.envelope.metadata.copy(label = displayName),
+            ),
+        )
+        state.value = state.value + (workflowId to updated)
+        updated
+    }
+
     override suspend fun delete(workflowId: String) = mutex.withLock {
         state.value = state.value - workflowId
     }
