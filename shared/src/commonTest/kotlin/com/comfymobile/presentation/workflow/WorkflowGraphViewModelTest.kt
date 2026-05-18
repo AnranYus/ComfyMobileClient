@@ -361,6 +361,9 @@ class WorkflowGraphViewModelTest {
 
         override suspend fun listRecents(limit: Int): List<WorkflowRow> = rows.values.toList()
 
+        override suspend fun markOpened(workflowId: String, openedAtEpochMs: Long): WorkflowRow? =
+            rows[workflowId]
+
         override suspend fun delete(workflowId: String) { /* no-op for these tests */ }
     }
 }
