@@ -2,6 +2,8 @@ package com.comfymobile.presentation.library
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.getValue
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.addressOf
 import kotlinx.cinterop.usePinned
@@ -21,10 +23,14 @@ import platform.posix.fwrite
 @Composable
 actual fun rememberPlatformWorkflowExportGateway(
     onResult: (WorkflowExportRequest, WorkflowExportResult) -> Unit,
-): PlatformWorkflowExportGateway =
-    remember(onResult) {
-        IosWorkflowExportGateway(onResult = onResult)
+): PlatformWorkflowExportGateway {
+    val latestOnResult by rememberUpdatedState(onResult)
+    return remember {
+        IosWorkflowExportGateway(
+            onResult = { request, result -> latestOnResult(request, result) },
+        )
     }
+}
 
 private class IosWorkflowExportGateway(
     private val onResult: (WorkflowExportRequest, WorkflowExportResult) -> Unit,
