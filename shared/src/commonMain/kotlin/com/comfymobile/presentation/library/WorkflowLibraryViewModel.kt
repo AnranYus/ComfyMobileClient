@@ -24,6 +24,9 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class WorkflowLibraryViewModel(
@@ -39,9 +42,16 @@ class WorkflowLibraryViewModel(
     private val pendingDeleteId = MutableStateFlow<String?>(null)
     private val pendingRenameId = MutableStateFlow<String?>(null)
     private val renameDraft = MutableStateFlow("")
+    private val activeExport = MutableStateFlow<ActiveExport?>(null)
+    private val exportError = MutableStateFlow<WorkflowLibraryExportError?>(null)
     private val pendingRename = combine(pendingRenameId, renameDraft) { id, draft ->
         PendingRename(id = id, draft = draft)
     }
+    private val exportStatus = combine(activeExport, exportError) { activeExport, exportError ->
+        ExportStatus(active = activeExport, error = exportError)
+    }
+    private var nextExportActionId = 1L
+    private val exportJson = Json { prettyPrint = true }
     private val succeededOutputJobs = activeServer.current.flatMapLatest { server ->
         if (server == null) {
             flowOf(ThumbnailJobSnapshot(serverId = null, jobs = emptyList()))
@@ -50,14 +60,14 @@ class WorkflowLibraryViewModel(
                 .map { jobs -> ThumbnailJobSnapshot(serverId = server.serverId, jobs = jobs) }
         }
     }
-    private val librarySources = combine(
+    private val workflowSources = combine(
         repository.observeAll(),
         activeServer.current,
         connectionState,
         pendingDeleteId,
         pendingRename,
     ) { workflows, server, connection, pendingDelete, pendingRename ->
-        LibrarySources(
+        WorkflowSources(
             workflows = workflows,
             server = server,
             connection = connection,
@@ -65,8 +75,20 @@ class WorkflowLibraryViewModel(
             pendingRename = pendingRename,
         )
     }
+    private val librarySources = combine(workflowSources, exportStatus) { workflowSources, exportStatus ->
+        LibrarySources(
+            workflows = workflowSources.workflows,
+            server = workflowSources.server,
+            connection = workflowSources.connection,
+            pendingDelete = workflowSources.pendingDelete,
+            pendingRename = workflowSources.pendingRename,
+            exportStatus = exportStatus,
+        )
+    }
     private val mutableOpenEvents = MutableSharedFlow<WorkflowRow>(extraBufferCapacity = 1)
     val openEvents: Flow<WorkflowRow> = mutableOpenEvents.asSharedFlow()
+    private val mutableExportEvents = MutableSharedFlow<WorkflowExportRequest>(extraBufferCapacity = 1)
+    val exportEvents: Flow<WorkflowExportRequest> = mutableExportEvents.asSharedFlow()
 
     val state: StateFlow<WorkflowLibraryScreenState> = combine(
         librarySources,
@@ -82,7 +104,7 @@ class WorkflowLibraryViewModel(
             workflow.toLibraryRowState(
                 thumbnailUrl = latestOutputsByWorkflowId[workflow.workflowId]
                     ?.let(thumbnailUrlForOutput),
-            )
+            ).copy(isExporting = workflow.workflowId == sources.exportStatus.active?.workflowId)
         }
         val statusUi = ConnectionStatusUi.from(sources.connection, sources.server)
         WorkflowLibraryScreenState(
@@ -94,6 +116,8 @@ class WorkflowLibraryViewModel(
             pendingDelete = rows.firstOrNull { it.workflowId == sources.pendingDelete },
             pendingRename = rows.firstOrNull { it.workflowId == sources.pendingRename.id },
             renameDraft = sources.pendingRename.draft,
+            exportingWorkflowId = sources.exportStatus.active?.workflowId,
+            exportError = sources.exportStatus.error,
             language = language,
         )
     }.stateIn(
@@ -109,6 +133,8 @@ class WorkflowLibraryViewModel(
     fun actions(onImport: () -> Unit = {}): WorkflowLibraryActions = WorkflowLibraryActions(
         onImport = onImport,
         onOpenWorkflow = ::openWorkflow,
+        onExportRequested = ::requestExport,
+        onDismissExportError = ::dismissExportError,
         onRenameRequested = ::requestRename,
         onRenameValueChanged = ::updateRenameDraft,
         onDismissRename = ::dismissRename,
@@ -125,6 +151,55 @@ class WorkflowLibraryViewModel(
                 openedAtEpochMs = nowEpochMs(),
             )?.let { mutableOpenEvents.emit(it) }
         }
+    }
+
+    fun requestExport(workflowId: String) {
+        if (activeExport.value != null) return
+        val export = ActiveExport(workflowId = workflowId, actionId = nextExportActionId++)
+        activeExport.value = export
+        exportError.value = null
+        scope.launch {
+            val row = repository.getById(workflowId)
+            if (row == null) {
+                if (activeExport.value == export) {
+                    activeExport.value = null
+                }
+                exportError.value = WorkflowLibraryExportError(
+                    message = WorkflowLibraryCopy.exportGenericFailure.resolve(language),
+                )
+                return@launch
+            }
+            mutableExportEvents.emit(row.toExportRequest(export))
+        }
+    }
+
+    fun onExportResult(request: WorkflowExportRequest, result: WorkflowExportResult) {
+        val active = activeExport.value
+        if (active?.actionId != request.actionId || active.workflowId != request.workflowId) return
+        when (result) {
+            WorkflowExportResult.Success,
+            WorkflowExportResult.Cancelled,
+            -> {
+                activeExport.value = null
+            }
+            WorkflowExportResult.Unsupported -> {
+                activeExport.value = null
+                exportError.value = WorkflowLibraryExportError(
+                    message = WorkflowLibraryCopy.exportUnsupported.resolve(language),
+                )
+            }
+            is WorkflowExportResult.Failed -> {
+                activeExport.value = null
+                exportError.value = WorkflowLibraryExportError(
+                    message = result.message?.takeIf { it.isNotBlank() }
+                        ?: WorkflowLibraryCopy.exportGenericFailure.resolve(language),
+                )
+            }
+        }
+    }
+
+    fun dismissExportError() {
+        exportError.value = null
     }
 
     fun requestRename(workflowId: String) {
@@ -177,12 +252,31 @@ class WorkflowLibraryViewModel(
         val draft: String,
     )
 
+    private data class ActiveExport(
+        val workflowId: String,
+        val actionId: Long,
+    )
+
+    private data class ExportStatus(
+        val active: ActiveExport?,
+        val error: WorkflowLibraryExportError?,
+    )
+
+    private data class WorkflowSources(
+        val workflows: List<WorkflowRow>,
+        val server: com.comfymobile.domain.server.ServerInfo?,
+        val connection: ConnectionState,
+        val pendingDelete: String?,
+        val pendingRename: PendingRename,
+    )
+
     private data class LibrarySources(
         val workflows: List<WorkflowRow>,
         val server: com.comfymobile.domain.server.ServerInfo?,
         val connection: ConnectionState,
         val pendingDelete: String?,
         val pendingRename: PendingRename,
+        val exportStatus: ExportStatus,
     )
 
     private data class ThumbnailJobSnapshot(
@@ -198,4 +292,20 @@ class WorkflowLibraryViewModel(
                 if (!containsKey(key)) put(key, output)
             }
         }
+
+    private fun WorkflowRow.toExportRequest(activeExport: ActiveExport): WorkflowExportRequest =
+        WorkflowExportRequest(
+            workflowId = workflowId,
+            actionId = activeExport.actionId,
+            fileName = displayName.toExportFileName(),
+            json = exportJson.encodeToString(JsonElement.serializer(), envelope.original),
+        )
+
+    private fun String.toExportFileName(): String {
+        val cleaned = map { char ->
+            if (char.isLetterOrDigit() || char == '.' || char == '_' || char == '-') char else '_'
+        }.joinToString("").trim('_')
+        val stem = cleaned.takeIf { it.isNotBlank() } ?: "workflow"
+        return if (stem.endsWith(".json", ignoreCase = true)) stem else "$stem.json"
+    }
 }

@@ -17,12 +17,16 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
 class WorkflowLibraryViewModelTest {
@@ -250,6 +254,98 @@ class WorkflowLibraryViewModelTest {
         runCurrent()
 
         assertNull(vm.state.value.rows.single().thumbnailUrl)
+    }
+
+    @Test fun export_json_uses_current_repository_row_and_emits_platform_request() = runTest {
+        val repository = InMemoryWorkflowRepository()
+        val row = repository.upsert(envelope(label = "Export me", createdAt = 100L, marker = "repository"))
+        val vm = viewModel(repository, scope = backgroundScope)
+        val request = async { vm.exportEvents.first() }
+
+        runCurrent()
+        vm.requestExport(row.workflowId)
+        runCurrent()
+
+        val export = request.await()
+        val expectedJson = Json { prettyPrint = true }
+            .encodeToString(JsonElement.serializer(), row.envelope.original)
+        assertEquals(row.workflowId, export.workflowId)
+        assertEquals("Export_me.json", export.fileName)
+        assertEquals(expectedJson, export.json)
+        assertEquals(row.workflowId, vm.state.value.exportingWorkflowId)
+        assertEquals(true, vm.state.value.rows.single().isExporting)
+    }
+
+    @Test fun export_cancel_clears_busy_without_error() = runTest {
+        val repository = InMemoryWorkflowRepository()
+        val row = repository.upsert(envelope(label = "Cancel export", createdAt = 100L))
+        val vm = viewModel(repository, scope = backgroundScope)
+        val request = async { vm.exportEvents.first() }
+
+        vm.requestExport(row.workflowId)
+        runCurrent()
+        val export = request.await()
+        vm.onExportResult(export, WorkflowExportResult.Cancelled)
+        runCurrent()
+
+        assertNull(vm.state.value.exportingWorkflowId)
+        assertNull(vm.state.value.exportError)
+        assertEquals(false, vm.state.value.rows.single().isExporting)
+    }
+
+    @Test fun export_failure_clears_busy_and_surfaces_error() = runTest {
+        val repository = InMemoryWorkflowRepository()
+        val row = repository.upsert(envelope(label = "Fail export", createdAt = 100L))
+        val vm = viewModel(repository, scope = backgroundScope)
+        val request = async { vm.exportEvents.first() }
+
+        vm.requestExport(row.workflowId)
+        runCurrent()
+        val export = request.await()
+        vm.onExportResult(export, WorkflowExportResult.Failed("Disk full"))
+        runCurrent()
+
+        assertNull(vm.state.value.exportingWorkflowId)
+        assertEquals("Disk full", vm.state.value.exportError?.message)
+    }
+
+    @Test fun export_result_ignores_stale_action_generation() = runTest {
+        val repository = InMemoryWorkflowRepository()
+        val first = repository.upsert(envelope(label = "First", createdAt = 100L, marker = "first"))
+        val second = repository.upsert(envelope(label = "Second", createdAt = 200L, marker = "second"))
+        val vm = viewModel(repository, scope = backgroundScope)
+        val firstRequest = async { vm.exportEvents.first() }
+
+        vm.requestExport(first.workflowId)
+        runCurrent()
+        val stale = firstRequest.await()
+        vm.onExportResult(stale, WorkflowExportResult.Cancelled)
+        runCurrent()
+
+        val secondRequest = async { vm.exportEvents.first() }
+        vm.requestExport(second.workflowId)
+        runCurrent()
+        val current = secondRequest.await()
+        vm.onExportResult(stale, WorkflowExportResult.Failed("old failure"))
+        runCurrent()
+
+        assertEquals(second.workflowId, vm.state.value.exportingWorkflowId)
+        assertNull(vm.state.value.exportError)
+
+        vm.onExportResult(current, WorkflowExportResult.Success)
+        runCurrent()
+        assertNull(vm.state.value.exportingWorkflowId)
+    }
+
+    @Test fun export_missing_workflow_surfaces_failure_without_platform_request() = runTest {
+        val repository = InMemoryWorkflowRepository()
+        val vm = viewModel(repository, scope = backgroundScope)
+
+        vm.requestExport("missing")
+        runCurrent()
+
+        assertNull(vm.state.value.exportingWorkflowId)
+        assertNotNull(vm.state.value.exportError)
     }
 
     private fun viewModel(
