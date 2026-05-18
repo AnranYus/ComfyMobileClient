@@ -1,0 +1,52 @@
+-- Persisted imported workflow library. Unlike jobIndex, this table
+-- stores user-curated workflow documents rather than run history.
+
+CREATE TABLE workflow (
+    id TEXT NOT NULL PRIMARY KEY,
+    friendly_name TEXT NOT NULL,
+    format TEXT NOT NULL,
+    original_json TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    imported_at INTEGER NOT NULL,
+    last_opened_at INTEGER,
+    last_run_prompt_id TEXT
+);
+
+CREATE INDEX workflow_recents
+    ON workflow(last_opened_at DESC, imported_at DESC);
+
+-- ----- queries -----
+
+upsertWorkflow:
+INSERT OR REPLACE INTO workflow(
+    id,
+    friendly_name,
+    format,
+    original_json,
+    metadata_json,
+    imported_at,
+    last_opened_at,
+    last_run_prompt_id
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+selectWorkflowById:
+SELECT * FROM workflow WHERE id = ?;
+
+selectAllWorkflows:
+SELECT * FROM workflow
+ORDER BY COALESCE(last_opened_at, imported_at) DESC,
+         friendly_name ASC,
+         id ASC;
+
+selectRecentWorkflows:
+SELECT * FROM workflow
+ORDER BY COALESCE(last_opened_at, imported_at) DESC,
+         friendly_name ASC,
+         id ASC
+LIMIT :limit;
+
+markWorkflowOpened:
+UPDATE workflow SET last_opened_at = ? WHERE id = ?;
+
+deleteWorkflow:
+DELETE FROM workflow WHERE id = ?;

@@ -27,6 +27,9 @@ interface WorkflowRepository {
     /** Snapshot recent workflows, most recently opened/imported first. */
     suspend fun listRecents(limit: Int = 50): List<WorkflowRow>
 
+    /** Mark a workflow as opened and return the updated row. */
+    suspend fun markOpened(workflowId: String, openedAtEpochMs: Long): WorkflowRow?
+
     /** Delete one imported workflow. */
     suspend fun delete(workflowId: String)
 }

@@ -9,6 +9,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,11 +31,12 @@ import com.comfymobile.domain.job.JobOutputRef
 import com.comfymobile.domain.server.ServerHistoryStore
 import com.comfymobile.presentation.connection.ConnectRoute
 import com.comfymobile.presentation.connection.ConnectViewModel
-import com.comfymobile.presentation.gallery.OutputGalleryActionGateway
 import com.comfymobile.presentation.gallery.OutputGalleryRoute
 import com.comfymobile.presentation.gallery.OutputGalleryViewModel
 import com.comfymobile.presentation.importer.WorkflowImportRoute
 import com.comfymobile.presentation.importer.WorkflowImportViewModel
+import com.comfymobile.presentation.library.WorkflowLibraryRoute
+import com.comfymobile.presentation.library.WorkflowLibraryViewModel
 import com.comfymobile.presentation.run.RunCopy
 import com.comfymobile.presentation.run.RunRoute
 import kotlinx.coroutines.launch
@@ -47,11 +49,12 @@ import org.koin.core.parameter.parametersOf
  * T1.4b part 3d-ii rewires this from the Phase 1.0 Hello-screen to
  * the live connect flow. T2.3 follow-up adds the MVP loop wiring:
  *
- *   ConnectRoute (always) + WorkflowImportRoute (always overlay)
+ *   ConnectRoute until an active server exists, then WorkflowLibraryRoute
+ *   plus WorkflowImportRoute dialogs.
  *     │
- *     ├─ when a workflow is imported (importViewModel.state.lastImportedRow != null):
- *     │    show a "Run" FAB (bottom-start to avoid collision with the
- *     │    import FAB at bottom-end).
+ *     ├─ WorkflowLibraryRoute exposes persisted workflows and the
+ *     │    import entry. Until WorkflowGraphRoute lands, tapping a row
+ *     │    selects it as the active workflow seam for the Run FAB.
  *     │
  *     ├─ tap Run → AppScreen.Running(envelope) → RunRoute overlay.
  *     │
@@ -114,6 +117,9 @@ fun App() {
                     scope = scope,
                 )
             }
+            val libraryViewModel = remember(scope) {
+                koin.get<WorkflowLibraryViewModel> { parametersOf(scope) }
+            }
             DisposableEffect(coordinator) {
                 coordinator.start()
                 onDispose { coordinator.stop() }
@@ -139,24 +145,54 @@ fun App() {
 
             // ----------------------------------------------------------------- MVP nav state
             var screen by remember { mutableStateOf<AppScreen>(AppScreen.Idle) }
+            var selectedWorkflow by remember { mutableStateOf<com.comfymobile.domain.workflow.WorkflowRow?>(null) }
+            val connectState by viewModel.screenState.collectAsState()
             val importState by importViewModel.state.collectAsState()
-            val canRun = importState.lastImportedRow != null
+            LaunchedEffect(importState.lastImportedRow?.workflowId) {
+                importState.lastImportedRow?.let { selectedWorkflow = it }
+            }
+            val hasActiveServer = connectState.activeServer != null
+            val canRun = canShowRunShortcut(
+                selectedWorkflowId = selectedWorkflow?.workflowId,
+                hasActiveServer = hasActiveServer,
+                screen = screen,
+            )
 
             Box(modifier = Modifier.fillMaxSize()) {
-                ConnectRoute(viewModel = viewModel)
+                if (!hasActiveServer) {
+                    ConnectRoute(viewModel = viewModel)
+                } else {
+                    WorkflowLibraryRoute(
+                        viewModel = libraryViewModel,
+                        onImport = { importViewModel.openSheet() },
+                        onWorkflowOpened = { selectedWorkflow = it },
+                        onWorkflowDeleted = { deletedWorkflowId ->
+                            if (shouldClearSelectedWorkflowAfterDelete(
+                                    selectedWorkflowId = selectedWorkflow?.workflowId,
+                                    deletedWorkflowId = deletedWorkflowId,
+                                )
+                            ) {
+                                selectedWorkflow = null
+                            }
+                        },
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
                 WorkflowImportRoute(
                     viewModel = importViewModel,
                     modifier = Modifier.fillMaxSize(),
+                    showFab = false,
                 )
 
                 // Run FAB visible only on the Idle screen with a loaded
                 // workflow. The FAB itself does not call into
                 // RunCoordinator — it only sets nav state to Running;
                 // RunRoute then drives submission via the coordinator.
-                if (canRun && screen is AppScreen.Idle) {
+                if (canRun) {
                     ExtendedFloatingActionButton(
                         onClick = {
-                            val envelope = importState.lastImportedRow?.envelope ?: return@ExtendedFloatingActionButton
+                            if (!hasActiveServer) return@ExtendedFloatingActionButton
+                            val envelope = selectedWorkflow?.envelope ?: return@ExtendedFloatingActionButton
                             screen = AppScreen.Running(envelope)
                         },
                         modifier = Modifier
