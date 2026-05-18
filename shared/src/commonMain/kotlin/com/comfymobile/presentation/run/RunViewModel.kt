@@ -194,6 +194,7 @@ class RunViewModel(
             serverId = server.serverId,
             baseUrl = server.baseUrl,
             clientId = clientId,
+            workflowId = prepared.workflowId,
             workflowUi = ui,
             objectInfo = prepared.objectInfo,
             workflowSnapshotJson = prepared.envelope.uiJsonOrNull(),

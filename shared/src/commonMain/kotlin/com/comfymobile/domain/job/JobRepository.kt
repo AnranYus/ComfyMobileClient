@@ -47,6 +47,14 @@ interface JobRepository {
     fun observeByServer(serverId: String, limit: Int = 50, offset: Int = 0): Flow<List<Job>>
 
     /**
+     * Stream all successful rows for [serverId] that have both a
+     * persisted [Job.workflowId] and a first output ref, newest terminal
+     * first. Library thumbnails use this to find the latest output for
+     * a persisted workflow without re-querying ComfyUI `/history`.
+     */
+    fun observeSucceededWithFirstOutputByServer(serverId: String): Flow<List<Job>>
+
+    /**
      * All non-terminal rows for a given server. The reconciler calls
      * this on B/C reconnect to find rows that may have ghost
      * `running` / `queued` state while the client was offline.

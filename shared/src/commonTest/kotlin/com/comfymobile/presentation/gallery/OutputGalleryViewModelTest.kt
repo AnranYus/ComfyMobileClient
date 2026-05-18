@@ -285,6 +285,9 @@ class OutputGalleryViewModelTest {
         override fun observeByServer(serverId: String, limit: Int, offset: Int): Flow<List<Job>> =
             delegate.observeByServer(serverId, limit, offset)
 
+        override fun observeSucceededWithFirstOutputByServer(serverId: String): Flow<List<Job>> =
+            delegate.observeSucceededWithFirstOutputByServer(serverId)
+
         override suspend fun listInFlight(serverId: String): List<Job> =
             delegate.listInFlight(serverId)
 
@@ -337,6 +340,9 @@ class OutputGalleryViewModelTest {
 
         override fun observeByServer(serverId: String, limit: Int, offset: Int): Flow<List<Job>> =
             delegate.observeByServer(serverId, limit, offset)
+
+        override fun observeSucceededWithFirstOutputByServer(serverId: String): Flow<List<Job>> =
+            delegate.observeSucceededWithFirstOutputByServer(serverId)
 
         override suspend fun listInFlight(serverId: String): List<Job> =
             delegate.listInFlight(serverId)

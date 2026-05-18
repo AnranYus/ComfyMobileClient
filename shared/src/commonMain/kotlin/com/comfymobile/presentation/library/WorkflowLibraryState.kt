@@ -29,6 +29,7 @@ data class WorkflowLibraryScreenState(
 data class WorkflowLibraryRowState(
     val workflowId: String,
     val title: String,
+    val thumbnailUrl: String? = null,
     val nodeCount: Int,
     val format: WorkflowLibraryFormat,
     val importedAtEpochMs: Long,

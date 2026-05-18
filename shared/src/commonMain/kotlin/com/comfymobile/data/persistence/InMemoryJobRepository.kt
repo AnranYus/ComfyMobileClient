@@ -86,6 +86,18 @@ class InMemoryJobRepository : JobRepository {
                 .take(limit)
         }
 
+    override fun observeSucceededWithFirstOutputByServer(serverId: String): Flow<List<Job>> =
+        state.map { sourceState ->
+            sourceState.values
+                .filter { job ->
+                    job.serverId == serverId &&
+                        job.workflowId != null &&
+                        job.status == JobStatus.SUCCEEDED &&
+                        job.firstOutput != null
+                }
+                .sortedByDescending { it.finishedAtEpochMs ?: it.createdAtEpochMs }
+        }
+
     override suspend fun listInFlight(serverId: String): List<Job> =
         state.value.values
             .filter { it.serverId == serverId && !it.status.isTerminal }

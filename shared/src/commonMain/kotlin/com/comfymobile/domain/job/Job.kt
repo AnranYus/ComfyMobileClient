@@ -59,6 +59,12 @@ data class JobOutputRef(
 data class Job(
     val promptId: String,
     val serverId: String,
+    /**
+     * Persisted workflow row that launched this job, when the run came
+     * from the local Library → Graph path. Nullable for legacy rows and
+     * imported server-side history rows that have no local workflow row.
+     */
+    val workflowId: String? = null,
     val status: JobStatus,
     val workflowSnapshotJson: String? = null,
     val apiPromptJson: String? = null,
