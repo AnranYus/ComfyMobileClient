@@ -87,6 +87,17 @@ kotlin {
             implementation(libs.ktor.client.okhttp)
             implementation(libs.sqldelight.android.driver)
         }
+        val androidUnitTest by getting {
+            dependencies {
+                // Regression coverage for the AndroidLifecycleMonitor
+                // dispatcher contract (P0 launch-crash fix). androidx
+                // Lifecycle types are pulled in via the main dep
+                // (lifecycle-process transitively brings lifecycle-common)
+                // so we just need kotlin test + coroutines test here.
+                implementation(kotlin("test"))
+                implementation(libs.kotlinx.coroutines.test)
+            }
+        }
         iosMain.dependencies {
             implementation(libs.ktor.client.darwin)
             implementation(libs.sqldelight.native.driver)
