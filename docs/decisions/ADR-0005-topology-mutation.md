@@ -1,7 +1,7 @@
 # ADR-0005: Topology mutation strategy — op-log + lazy fold
 
 - Date: 2026-05-31
-- Status: Proposed
+- Status: Accepted
 - Decided in: Slock #ComfyMobile (msg `7d6c30b1` Phase 3 dispatch, msg `acea64f3` ADR-0005 commission); supersedes the "topology immutable in MVP" stance from [ADR-0003](ADR-0003-workflow-roundtrip-strategy.md) §3.
 - Owner (decision): @Priestess (project host), @Cody (main dev), @Longly (review)
 - Related research: [notes/research-phase3-topology.md](../../notes/research-phase3-topology.md)
