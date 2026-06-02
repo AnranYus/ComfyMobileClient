@@ -134,7 +134,7 @@ It walks the log, applying each op as a targeted JSON edit on a copy of `origina
 | V6 | **Id uniqueness** — newly-allocated node ids do not collide with existing ones. ComfyUI uses sequential ints; we mint `max(existing) + 1`. | Invariant, enforced by `WorkingGraph` allocator. | On-op (by construction). |
 | V7 | **`widgets_values` alignment** — after fold, `widgets_values.size == widgetOrder(classType).size` (counting `UI_ONLY_WIDGETS`). Requires `/object_info[classType]` to know `widgetOrder`; same skip path as V4 when missing (§6 Q4). | Hard block. | Pre-run only. |
 
-Maps to T0.5 acceptance suite: V4 ↔ G-04, V5 ↔ G-07. New IDs Phase 3 will introduce: G-15..G-21 (one per check above) — landed in a follow-up to `docs/qa/`.
+Maps to T0.5 acceptance suite: **V1 + V2 + V3 + V7 jointly underpin G-07** ("UI → API 转换可靠 ... link 和 widget 参数映射正确") — without those four checks the conversion can produce an invalid prompt. V4 (unfed required inputs), V5 (no cycles) and V6 (id uniqueness) are net-new invariants Phase 3 introduces and have no direct T0.5 ID. New IDs Phase 3 will introduce: G-15..G-21 (one per check above) — landed in a follow-up to `docs/qa/`. (G-04 "不重复提交" is submit idempotency, orthogonal to all seven checks here.)
 
 ### 6. Specific answers to the questions Phase 2 left open
 
