@@ -1,0 +1,52 @@
+-- 4.sqm — adds workflow.imported_original_json (ADR-0006).
+--
+-- SQLite cannot ALTER TABLE … ADD COLUMN … NOT NULL without a non-NULL
+-- default. The only defensible default for existing rows is the per-row
+-- original_json: pre-Phase-3 there was no writer for original_json, so
+-- every existing row's original_json equals the JSON WorkflowImporter
+-- produced at row creation. ADR-0003's structure-lossless invariant
+-- therefore holds at the backfill instant, which is what makes the
+-- column backfill `imported_original_json := original_json` correct.
+--
+-- This is the project's first multi-statement .sqm; per ADR-0006
+-- §Consequences the test (Migration4Test) is the proof that
+-- SQLDelight 2.0.2 + bundled JVM SQLite driver execute it correctly.
+-- Roll-forward fallback if multi-statement execution surfaces a driver
+-- issue: split into 4.sqm (rename + create + insert-select) and 4b.sqm
+-- (drop + recreate-index); head schema in Workflow.sq is unchanged.
+--
+-- No FK columns reference workflow.id today (Job.sq:workflow_id is a
+-- bare TEXT column with no FOREIGN KEY clause), so the rebuild does
+-- not need a PRAGMA foreign_keys = OFF toggle. Any future migration
+-- that introduces an FK on workflow.id must add that pragma around
+-- the next table rebuild — call out in the consumer ADR at that time.
+
+ALTER TABLE workflow RENAME TO workflow_v3;
+
+CREATE TABLE workflow (
+    id TEXT NOT NULL PRIMARY KEY,
+    friendly_name TEXT NOT NULL,
+    format TEXT NOT NULL,
+    original_json TEXT NOT NULL,
+    imported_original_json TEXT NOT NULL,
+    metadata_json TEXT NOT NULL,
+    imported_at INTEGER NOT NULL,
+    last_opened_at INTEGER,
+    last_run_prompt_id TEXT
+);
+
+INSERT INTO workflow(
+    id, friendly_name, format,
+    original_json, imported_original_json,
+    metadata_json, imported_at, last_opened_at, last_run_prompt_id
+)
+SELECT
+    id, friendly_name, format,
+    original_json, original_json,
+    metadata_json, imported_at, last_opened_at, last_run_prompt_id
+FROM workflow_v3;
+
+DROP TABLE workflow_v3;
+
+CREATE INDEX workflow_recents
+    ON workflow(last_opened_at DESC, imported_at DESC);

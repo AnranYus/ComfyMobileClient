@@ -31,11 +31,20 @@ class SqlDelightWorkflowRepository(
         val existing = queries.selectWorkflowById(workflowId).executeAsOneOrNull()
         val importedAt = existing?.imported_at ?: envelope.metadata.createdAtEpochMs
         val lastOpenedAt = existing?.last_opened_at
+        val originalJsonText = json.encodeToString(JsonElement.serializer(), envelope.original)
+        // ADR-0006 §4: imported_original_json captures the FIRST import of
+        // this row. Re-importing the same workflow id reuses the existing
+        // anchor; if the user wants the new file's JSON to become the
+        // rollback target they must delete + re-import explicitly. The
+        // read-then-upsert is safe under the single-threaded importer
+        // path; future parallel-import paths must wrap this in a tx.
+        val importedOriginalJsonText = existing?.imported_original_json ?: originalJsonText
         queries.upsertWorkflow(
             id = workflowId,
             friendly_name = envelope.metadata.label,
             format = envelope.format.name,
-            original_json = json.encodeToString(JsonElement.serializer(), envelope.original),
+            original_json = originalJsonText,
+            imported_original_json = importedOriginalJsonText,
             metadata_json = json.encodeToString(envelope.metadata),
             imported_at = importedAt,
             last_opened_at = lastOpenedAt,

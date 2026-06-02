@@ -6,6 +6,13 @@ CREATE TABLE workflow (
     friendly_name TEXT NOT NULL,
     format TEXT NOT NULL,
     original_json TEXT NOT NULL,
+    -- The as-imported JSON anchor for ADR-0005 §2 / T0.3 "reset to
+    -- imported". Immutable for the row's lifetime — never overwritten
+    -- by re-import (WorkflowImporter guards) or by WorkingGraph.confirm()
+    -- (only original_json is folded). Backfilled to match original_json
+    -- by 4.sqm per ADR-0006 §3; going forward only fresh-import row
+    -- creation sets this column.
+    imported_original_json TEXT NOT NULL,
     metadata_json TEXT NOT NULL,
     imported_at INTEGER NOT NULL,
     last_opened_at INTEGER,
@@ -23,11 +30,12 @@ INSERT OR REPLACE INTO workflow(
     friendly_name,
     format,
     original_json,
+    imported_original_json,
     metadata_json,
     imported_at,
     last_opened_at,
     last_run_prompt_id
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 selectWorkflowById:
 SELECT * FROM workflow WHERE id = ?;
