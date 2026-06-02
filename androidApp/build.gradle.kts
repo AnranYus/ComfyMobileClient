@@ -20,6 +20,27 @@ android {
         compose = true
     }
 
+    // Pin the debug signing identity to a repo-checked-in keystore so every
+    // CI runner produces APKs with the same SHA-256 certificate fingerprint.
+    // Without this, AGP auto-generates a per-machine debug.keystore at
+    // ~/.android/debug.keystore on first build, which is the reason
+    // v0.1.0 and v0.1.1 had different cert SHA-256s and Android refused
+    // the in-place upgrade (INSTALL_FAILED_UPDATE_INCOMPATIBLE).
+    //
+    // The keystore + password are intentionally well-known (Android Debug
+    // defaults — same identity AGP would have generated locally). Debug-
+    // signed APKs cannot be uploaded to Play Store and have no security
+    // value beyond identifying the build channel; release signing will
+    // ship as its own ADR + isolated keystore at v0.3+ (not in this PR).
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug-fixed.jks")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         getByName("release") {
             isMinifyEnabled = false
