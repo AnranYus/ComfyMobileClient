@@ -175,7 +175,27 @@ Maps to T0.5 acceptance suite: **V1 + V2 + V3 + V7 jointly underpin G-07** ("UI 
 - [ADR-0002](ADR-0002-rendering-layer-candidate-A.md): Compose Canvas renderer. `ParsedUiGraph` is its input; this ADR only adds a new producer for that input.
 - [ADR-0003](ADR-0003-workflow-roundtrip-strategy.md): Structure-lossless `original` is what this ADR has to preserve across edits.
 - [ADR-0004](ADR-0004-lan-only-manual-ip.md): LAN-only deployment. Q4's asymmetric LAN-disconnected behaviour (AddNode blocked, edits on imported nodes optimistic) follows from "may be offline against the editing server".
-- **ADR-0006 (forthcoming): v0.2 data migration** — owns the `workflow.imported_original_json` schema migration this ADR depends on. To be opened when v0.2 implementation starts.
+- [ADR-0006](ADR-0006-v0.2-data-migration.md): owns the `workflow.imported_original_json` schema migration this ADR depends on.
 - `docs/architecture/T0.1-comfyui-integration.md` §3 — UI vs API format details. §3.5 / T0.1 M2 — `/object_info[class_type].input.required` widget registration-order rules referenced by §1 `AddNode`.
 - `docs/qa/T0.5-*.md` — acceptance suite this ADR extends with G-15..G-21.
 - Phase 2 PR #40 `WorkflowGraphRoute` — the `apiFormatUnsupported` graceful degrade copy that §1 out-of-scope inherits.
+
+## Amendments
+
+### A1 (2026-06-02): `AddNode` requires-objectInfo precondition covers port shape, not just widgets
+
+Surfaced during PR #51 (T3.2 + T3.3) review: the original Decision wording in §1 and §6 Q4 only spelled out widget-side use of `/object_info[classType]` ("default widget values from /object_info ... no link wiring"). Reviewers (Cody, Priestess) found that omitting `inputs[]` / `outputs[]` port shape from the AddNode payload silently breaks the `AddNode → Connect → submit` flow — `applyConnect`'s `updateNodeInputLink` no-ops when the new node has no input slots to address, and `uiToApi` therefore drops the wire.
+
+The "requires `/object_info[classType]`" precondition covers **three** facets of the new node's JSON, not one:
+
+| Facet | Source | Shape |
+|---|---|---|
+| (a) `widgets_values` ordering + defaults | `INPUT_TYPES.required` primitive-typed entries, per T0.1 M2 registration order | array, one entry per primitive widget |
+| (b) `inputs[]` port shape | `INPUT_TYPES.required` non-primitive entries (the wireable inputs) | array of `{ name, type, link: null }` |
+| (c) `outputs[]` port shape | `output_types` (and `output_name` if present) | array of `{ name, type, links: [] }` |
+
+Missing any of these makes Connect-after-Add a silent no-op at the consumer's wire site. The `WorkingGraph.canAddNode(classType)` gate's "objectInfo has an entry for classType" check is sufficient as a guard — the entry already carries all three facets — but the consumer of that gate must understand its scope, hence this amendment.
+
+§6 Q5's compound-atomic `RemoveNode` is unchanged: its snapshot already carries the full node JSON (including whatever inputs/outputs shape the node had) so undo restores correctly regardless of (a)(b)(c)'s source.
+
+Tracked implementation: task T3.2.1.
