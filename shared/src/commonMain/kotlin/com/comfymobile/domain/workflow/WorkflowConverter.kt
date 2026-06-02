@@ -2,10 +2,12 @@ package com.comfymobile.domain.workflow
 
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
@@ -199,4 +201,242 @@ class WorkflowConverter {
             "INT", "FLOAT", "STRING", "BOOLEAN",
         )
     }
+
+    /**
+     * Phase 3 topology mutation entry point — fold an op log onto a
+     * UI-format workflow and return the resulting UI-format
+     * workflow. Per ADR-0005 §4: targeted JSON edits, NOT a full
+     * `apiToUi` inverse converter.
+     *
+     * The input [original] is **not mutated**; the returned
+     * `WorkflowGraph.Ui` is a fresh `JsonObject` built bottom-up
+     * from a copy of `original.raw` with each op in [log] applied
+     * in order. Every key the editor doesn't explicitly touch
+     * passes through verbatim (ADR-0003 structure-lossless extends
+     * through edit sessions per ADR-0005 §2).
+     *
+     * @param objectInfo cached `/object_info` payload. Used only by
+     *   `TopologyOp.AddNode` to look up widget order + defaults for
+     *   non-whitelist classTypes. `null` is tolerated for ops other
+     *   than AddNode; AddNode of a non-whitelist class with
+     *   `objectInfo == null` is the caller's bug (the editor's
+     *   `WorkingGraph.canAddNode` should have blocked it — see
+     *   ADR-0005 §6 Q4) and is handled defensively by emitting an
+     *   empty widgets_values list.
+     */
+    fun applyTopologyOps(
+        original: WorkflowGraph.Ui,
+        log: List<TopologyOp>,
+        objectInfo: JsonElement? = null,
+    ): WorkflowGraph.Ui {
+        if (log.isEmpty()) return original
+
+        // Materialize the JSON as mutable maps/lists so per-op
+        // edits don't require rebuilding the whole tree each time.
+        // We rebuild a JsonObject at the end.
+        var nodes = (original.raw["nodes"] as? JsonArray)?.toMutableList() ?: mutableListOf()
+        var links = (original.raw["links"] as? JsonArray)?.toMutableList() ?: mutableListOf()
+        val otherKeys = original.raw.filterKeys { it != "nodes" && it != "links" }
+
+        for (op in log) {
+            when (op) {
+                is TopologyOp.AddNode -> nodes = applyAddNode(nodes, op, objectInfo)
+                is TopologyOp.RemoveNode -> {
+                    val (newNodes, newLinks) = applyRemoveNode(nodes, links, op)
+                    nodes = newNodes
+                    links = newLinks
+                }
+                is TopologyOp.Connect -> {
+                    val (newNodes, newLinks) = applyConnect(nodes, links, op)
+                    nodes = newNodes
+                    links = newLinks
+                }
+                is TopologyOp.Disconnect -> {
+                    val (newNodes, newLinks) = applyDisconnect(nodes, links, op)
+                    nodes = newNodes
+                    links = newLinks
+                }
+            }
+        }
+
+        val rebuilt = buildJsonObject {
+            for ((k, v) in otherKeys) put(k, v)
+            put("nodes", JsonArray(nodes))
+            put("links", JsonArray(links))
+        }
+        return WorkflowGraph.Ui(raw = rebuilt)
+    }
+
+    // --- per-op apply helpers --------------------------------------------------
+
+    private fun applyAddNode(
+        nodes: MutableList<JsonElement>,
+        op: TopologyOp.AddNode,
+        objectInfo: JsonElement?,
+    ): MutableList<JsonElement> {
+        val widgetOrder = resolveWidgetOrder(op.classType, objectInfo)
+        val widgetsValues = buildJsonArray {
+            for (name in widgetOrder) {
+                if (name in UI_ONLY_WIDGETS) {
+                    // UI-only widgets occupy a slot in widgets_values
+                    // even though uiToApi strips them on submit.
+                    add(JsonNull)
+                } else {
+                    // Sensible per-type defaults. The richer
+                    // "look up default from object_info metadata"
+                    // path lives in a future polish task — what's
+                    // here at least keeps positional alignment so
+                    // V7 holds and the user can edit per-param via
+                    // the existing parameditor surface.
+                    add(defaultWidgetValue(op.classType, name, objectInfo))
+                }
+            }
+        }
+        val nodeJson = buildJsonObject {
+            put("id", JsonPrimitive(op.assignedId.toIntOrZero()))
+            put("type", JsonPrimitive(op.classType))
+            put("pos", buildJsonArray {
+                add(JsonPrimitive(op.posX))
+                add(JsonPrimitive(op.posY))
+            })
+            put("inputs", JsonArray(emptyList()))
+            put("outputs", JsonArray(emptyList()))
+            put("widgets_values", widgetsValues)
+        }
+        nodes.add(nodeJson)
+        return nodes
+    }
+
+    private fun applyRemoveNode(
+        nodes: MutableList<JsonElement>,
+        links: MutableList<JsonElement>,
+        op: TopologyOp.RemoveNode,
+    ): Pair<MutableList<JsonElement>, MutableList<JsonElement>> {
+        val targetIdInt = op.id.toIntOrNull()
+        val newNodes = nodes.filterNotTo(mutableListOf()) { entry ->
+            val obj = entry as? JsonObject ?: return@filterNotTo false
+            val nodeId = obj["id"]?.jsonPrimitive?.intOrNull
+            nodeId != null && nodeId == targetIdInt
+        }
+        // Cascade-drop any links whose source or target is the removed node.
+        val newLinks = links.filterNotTo(mutableListOf()) { entry ->
+            val arr = entry as? JsonArray ?: return@filterNotTo false
+            if (arr.size < 5) return@filterNotTo false
+            val src = (arr[1] as? JsonPrimitive)?.intOrNull
+            val dst = (arr[3] as? JsonPrimitive)?.intOrNull
+            src == targetIdInt || dst == targetIdInt
+        }
+        return newNodes to newLinks
+    }
+
+    private fun applyConnect(
+        nodes: MutableList<JsonElement>,
+        links: MutableList<JsonElement>,
+        op: TopologyOp.Connect,
+    ): Pair<MutableList<JsonElement>, MutableList<JsonElement>> {
+        val linkTuple = buildJsonArray {
+            add(JsonPrimitive(op.assignedLinkId))
+            add(JsonPrimitive(op.sourceNodeId.toIntOrZero()))
+            add(JsonPrimitive(op.sourceSlot))
+            add(JsonPrimitive(op.targetNodeId.toIntOrZero()))
+            add(JsonPrimitive(op.targetSlot))
+            add(JsonPrimitive(op.type))
+        }
+        links.add(linkTuple)
+        // Update the target node's inputs[targetSlot].link to point at the new
+        // link id. We mutate by rebuilding the slice; unknown fields on the
+        // node and on the input slot stay intact.
+        val updatedNodes = nodes.map { node ->
+            if (node !is JsonObject) return@map node
+            val nodeId = node["id"]?.jsonPrimitive?.intOrNull ?: return@map node
+            if (nodeId != op.targetNodeId.toIntOrZero()) return@map node
+            updateNodeInputLink(node, op.targetSlot, op.assignedLinkId)
+        }.toMutableList()
+        return updatedNodes to links
+    }
+
+    private fun applyDisconnect(
+        nodes: MutableList<JsonElement>,
+        links: MutableList<JsonElement>,
+        op: TopologyOp.Disconnect,
+    ): Pair<MutableList<JsonElement>, MutableList<JsonElement>> {
+        val removedTuple = op.removedLink as? JsonArray
+        val newLinks = links.filterNotTo(mutableListOf()) { entry ->
+            val arr = entry as? JsonArray ?: return@filterNotTo false
+            val id = (arr.getOrNull(0) as? JsonPrimitive)?.intOrNull
+            id != null && id == op.linkId
+        }
+        if (removedTuple != null && removedTuple.size >= 5) {
+            val targetNodeId = (removedTuple[3] as? JsonPrimitive)?.intOrNull
+            val targetSlot = (removedTuple[4] as? JsonPrimitive)?.intOrNull
+            if (targetNodeId != null && targetSlot != null) {
+                val updatedNodes = nodes.map { node ->
+                    if (node !is JsonObject) return@map node
+                    val nodeId = node["id"]?.jsonPrimitive?.intOrNull ?: return@map node
+                    if (nodeId != targetNodeId) return@map node
+                    updateNodeInputLink(node, targetSlot, null)
+                }.toMutableList()
+                return updatedNodes to newLinks
+            }
+        }
+        return nodes to newLinks
+    }
+
+    private fun updateNodeInputLink(
+        node: JsonObject,
+        slotIndex: Int,
+        linkId: Int?,
+    ): JsonObject {
+        val inputs = (node["inputs"] as? JsonArray)?.toMutableList() ?: return node
+        if (slotIndex !in inputs.indices) return node
+        val slot = inputs[slotIndex] as? JsonObject ?: return node
+        val rebuiltSlot = buildJsonObject {
+            for ((k, v) in slot) {
+                if (k == "link") put(k, linkId?.let { JsonPrimitive(it) } ?: JsonNull)
+                else put(k, v)
+            }
+            if ("link" !in slot) put("link", linkId?.let { JsonPrimitive(it) } ?: JsonNull)
+        }
+        inputs[slotIndex] = rebuiltSlot
+        return buildJsonObject {
+            for ((k, v) in node) {
+                if (k == "inputs") put(k, JsonArray(inputs))
+                else put(k, v)
+            }
+        }
+    }
+
+    private fun defaultWidgetValue(
+        classType: String,
+        widgetName: String,
+        objectInfo: JsonElement?,
+    ): JsonElement {
+        // Best-effort default per widget type. Phase 3 polish can
+        // extend this to read `["INT", { "default": 20 }]` metadata
+        // from objectInfo; what's here keeps positional alignment so
+        // V7 passes and the user can refine via the parameditor.
+        val typeName = lookupWidgetTypeName(classType, widgetName, objectInfo) ?: return JsonPrimitive("")
+        return when (typeName) {
+            "INT" -> JsonPrimitive(0)
+            "FLOAT" -> JsonPrimitive(0.0)
+            "STRING" -> JsonPrimitive("")
+            "BOOLEAN" -> JsonPrimitive(false)
+            else -> JsonPrimitive("")
+        }
+    }
+
+    private fun lookupWidgetTypeName(
+        classType: String,
+        widgetName: String,
+        objectInfo: JsonElement?,
+    ): String? {
+        val info = objectInfo as? JsonObject ?: return null
+        val classInfo = info[classType] as? JsonObject ?: return null
+        val required = (classInfo["input"] as? JsonObject)?.get("required") as? JsonObject ?: return null
+        val spec = required[widgetName] as? JsonArray ?: return null
+        val first = spec.firstOrNull() ?: return null
+        return (first as? JsonPrimitive)?.contentOrNull
+    }
+
+    private fun String.toIntOrZero(): Int = toIntOrNull() ?: 0
 }
