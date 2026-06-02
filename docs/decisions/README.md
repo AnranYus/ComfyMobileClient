@@ -8,5 +8,6 @@ Each ADR captures a decision made during the project's design with its context, 
 | [0002](ADR-0002-rendering-layer-candidate-A.md) | Node-graph rendering layer — Candidate A (Compose Canvas) | Accepted |
 | [0003](ADR-0003-workflow-roundtrip-strategy.md) | Workflow roundtrip strategy — preserve original JSON, simplify UI | Accepted |
 | [0004](ADR-0004-lan-only-manual-ip.md) | LAN-only connection model with manual IP entry | Accepted |
+| [0005](ADR-0005-topology-mutation.md) | Topology mutation strategy — op-log + lazy fold | Accepted |
 
 Future ADRs go here as additional architectural choices are made.
