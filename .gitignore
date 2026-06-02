@@ -46,3 +46,9 @@ gradle-wrapper-*.zip
 *.jks
 release/
 keystore.properties
+
+# Pinned debug keystore is explicitly committed (debug-only identity, no
+# security value beyond build-channel identification — see
+# androidApp/build.gradle.kts signingConfigs comment). Re-allows it
+# against the *.jks wildcard above.
+!androidApp/debug-fixed.jks
