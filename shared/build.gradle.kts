@@ -11,6 +11,26 @@ sqldelight {
     databases {
         create("ComfyMobileDb") {
             packageName.set("com.comfymobile.db")
+            // ADR-0006 §5 wanted `verifyMigrations.set(true)` here so
+            // sqldelight would fail-fast on any future `.sq` ↔ `.sqm`
+            // divergence. That is on hold for one PR: enabling it
+            // surfaces a pre-existing Phase 2 bootstrap gap — the
+            // existing 1.sqm/2.sqm/3.sqm are pure `ALTER TABLE`
+            // statements that assume prior schemas exist, so a
+            // verifyMigrations run from an empty DB cannot reach v3.
+            // The fix is to commit baseline `1.db` / `2.db` / `3.db`
+            // schema dumps alongside the `.sqm` files — that work is a
+            // separate task tracked at the channel level (see thread
+            // for ADR-0006 alignment). For T3.1's purposes the
+            // Migration4Test in `androidUnitTest` is the explicit proof
+            // that 3 → 4 works correctly and that this multi-statement
+            // `.sqm` executes under the bundled SQLite driver.
+            //
+            // schemaOutputDirectory stays on so the golden `databases/
+            // 4.db` schema dump still lands in the PR — it will be
+            // consumed by `verifyMigrations` once the baselines are
+            // bootstrapped.
+            schemaOutputDirectory.set(file("src/commonMain/sqldelight/databases"))
         }
     }
 }
@@ -96,6 +116,11 @@ kotlin {
                 // so we just need kotlin test + coroutines test here.
                 implementation(kotlin("test"))
                 implementation(libs.kotlinx.coroutines.test)
+                // ADR-0006 §6a: JVM-only in-memory SQLite driver for
+                // Migration4Test + the newInMemoryComfyMobileDb() helper.
+                // Lives in androidUnitTest (not commonTest) so it doesn't
+                // bleed into a future iosTest compile path.
+                implementation(libs.sqldelight.sqlite.driver)
             }
         }
         iosMain.dependencies {

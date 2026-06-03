@@ -43,4 +43,12 @@ data class WorkflowRow(
     val envelope: WorkflowEnvelope,
     val importedAtEpochMs: Long,
     val lastOpenedAtEpochMs: Long? = null,
+    /**
+     * The as-imported JSON anchor (ADR-0005 §2 / ADR-0006 §1). Byte-
+     * identical to the JSON the first `WorkflowImporter` run for this
+     * row produced. Threaded through to `WorkingGraph(importedOriginal =
+     * …)` so `resetToImported()` can rebuild the as-imported envelope
+     * regardless of whether prior edits were confirmed.
+     */
+    val importedOriginal: kotlinx.serialization.json.JsonElement = envelope.original,
 )

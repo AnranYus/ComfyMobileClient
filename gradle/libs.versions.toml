@@ -51,6 +51,10 @@ sqldelight-runtime                  = { module = "app.cash.sqldelight:runtime", 
 sqldelight-coroutines-extensions    = { module = "app.cash.sqldelight:coroutines-extensions",      version.ref = "sqldelight" }
 sqldelight-android-driver           = { module = "app.cash.sqldelight:android-driver",             version.ref = "sqldelight" }
 sqldelight-native-driver            = { module = "app.cash.sqldelight:native-driver",              version.ref = "sqldelight" }
+# In-memory JDBC SQLite driver — androidUnitTest only (ADR-0006 §6a). JVM
+# host execution path for Migration4Test; never compiled into a native
+# (iosArm64 / iosSimulatorArm64) artifact.
+sqldelight-sqlite-driver            = { module = "app.cash.sqldelight:sqlite-driver",              version.ref = "sqldelight" }
 
 # Multiplatform Settings
 multiplatform-settings              = { module = "com.russhwolf:multiplatform-settings",                       version.ref = "multiplatform-settings" }
