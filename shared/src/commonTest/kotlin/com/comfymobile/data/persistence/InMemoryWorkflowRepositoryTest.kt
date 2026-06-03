@@ -13,6 +13,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
+import kotlin.test.assertSame
+import kotlin.test.assertTrue
 
 class InMemoryWorkflowRepositoryTest {
 
@@ -113,6 +115,44 @@ class InMemoryWorkflowRepositoryTest {
 
         assertNull(repository.getById(row.workflowId))
         assertEquals(emptyList(), repository.listRecents())
+    }
+
+    @Test fun reImport_preservesImportedOriginalAnchor() = runTest {
+        // ADR-0006 §4 "first import wins": once a row has an
+        // imported_original_json anchor, a subsequent upsert for the
+        // same workflow id MUST NOT overwrite that anchor with the
+        // new envelope's original. Mirrors the SqlDelight repository
+        // contract — a regression here would make
+        // WorkingGraph.resetToImported() roll back to "my latest
+        // re-import" instead of "the import that created this row".
+        //
+        // workflow id is content-derived (WorkflowIdentity hashes the
+        // canonical JSON), so a re-import with different *content*
+        // produces a different id and lands on a different row. The
+        // observable case for the guard is "re-import same content,
+        // different JsonObject instance" — the test pins the guard by
+        // asserting the anchor is the *first* envelope's JsonObject
+        // instance (reference identity), not the second's.
+        val repository = InMemoryWorkflowRepository()
+        val first = envelope(label = "v1", createdAt = 100L, marker = "first-import")
+        val firstRow = repository.upsert(first)
+        assertSame(first.original, firstRow.importedOriginal,
+            "Fresh import: anchor should be the very same JsonObject the envelope carries.")
+
+        // Build a second envelope with byte-identical content but a
+        // distinct JsonObject instance. workflowIdFor canonicalises,
+        // so the id will match the first.
+        val second = envelope(label = "v2", createdAt = 200L, marker = "first-import")
+        assertTrue(first.original !== second.original,
+            "Test fixture sanity: the two envelopes must hold separate JsonObject instances.")
+
+        val secondRow = repository.upsert(second)
+        assertEquals(firstRow.workflowId, secondRow.workflowId,
+            "Pre-condition: re-import with identical content must land on the same workflow id.")
+        assertSame(first.original, secondRow.importedOriginal,
+            "Anchor must remain the first import's JsonObject instance, NOT the re-import's. " +
+                "Without the existing?.importedOriginal guard the default would substitute second.original.",
+        )
     }
 
     private fun envelope(

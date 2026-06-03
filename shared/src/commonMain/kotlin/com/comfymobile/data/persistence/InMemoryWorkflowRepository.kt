@@ -21,12 +21,19 @@ class InMemoryWorkflowRepository : WorkflowRepository {
     override suspend fun upsert(envelope: WorkflowEnvelope): WorkflowRow = mutex.withLock {
         val workflowId = WorkflowIdentity.workflowIdFor(envelope)
         val existing = state.value[workflowId]
+        // ADR-0006 §4 "first import wins": mirror the SqlDelight
+        // implementation so importer-side tests using this in-memory
+        // repo can't accidentally observe "reset to imported = latest
+        // re-import". Without the existing?.importedOriginal fallback,
+        // the WorkflowRow default (envelope.original) silently
+        // overwrites the anchor on every re-import.
         val row = WorkflowRow(
             workflowId = workflowId,
             displayName = envelope.metadata.label,
             envelope = envelope,
             importedAtEpochMs = existing?.importedAtEpochMs ?: envelope.metadata.createdAtEpochMs,
             lastOpenedAtEpochMs = existing?.lastOpenedAtEpochMs,
+            importedOriginal = existing?.importedOriginal ?: envelope.original,
         )
         state.value = state.value + (workflowId to row)
         row
